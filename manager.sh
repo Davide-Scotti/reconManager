@@ -5,13 +5,13 @@
 #              Gestisce avvio, aggiornamenti, storico sessioni e dipendenze.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 1.1
-# DATA: 2026-06-15
+# VERSIONE: 2.0
+# DATA: 2026-06-22
 #
 # USO: ./manager.sh
 ################################################################################
 
-set -u -o pipefail
+set -euo pipefail
 
 # Error handler
 error_handler() {
@@ -32,6 +32,8 @@ INSTALL="$SCRIPT_DIR/install.sh"
 SESSIONS_DIR="$SCRIPT_DIR/sessioni"
 MANAGER_LOG="$SCRIPT_DIR/manager.log"
 NVD_CACHE="$HOME/.cache/recognize_nvd/cvss_cache.json"
+RECON_CONF="$SCRIPT_DIR/recon.conf"
+MAX_LOG_SIZE_MB=10
 
 # Colori
 RED='\e[31m'; YEL='\e[33m'; GRN='\e[32m'; CYN='\e[36m'
@@ -40,12 +42,52 @@ BLU='\e[34m'; RST='\e[0m';  BLD='\e[1m';  GRY='\e[90m'
 mkdir -p "$SESSIONS_DIR"
 
 # ============================================================================
-# LOGGING
+# LOGGING CON ROTAZIONE AUTOMATICA
 # ============================================================================
 log() {
     local ts; ts=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$ts] $*" >> "$MANAGER_LOG" 2>/dev/null || true
+    # Rotazione automatica se il log supera MAX_LOG_SIZE_MB
+    if [ -f "$MANAGER_LOG" ]; then
+        local size_mb
+        size_mb=$(($(stat -c%s "$MANAGER_LOG" 2>/dev/null || echo 0) / 1048576))
+        if [ "$size_mb" -gt "$MAX_LOG_SIZE_MB" ] 2>/dev/null; then
+            mv "$MANAGER_LOG" "${MANAGER_LOG}.1" 2>/dev/null || true
+            touch "$MANAGER_LOG" 2>/dev/null || true
+            # Mantieni solo gli ultimi 3 log ruotati
+            rm -f "${MANAGER_LOG}.3" 2>/dev/null || true
+            mv "${MANAGER_LOG}.2" "${MANAGER_LOG}.3" 2>/dev/null || true
+            mv "${MANAGER_LOG}.1" "${MANAGER_LOG}.2" 2>/dev/null || true
+        fi
+    fi
 }
+
+# ============================================================================
+# PARSING CONFIGURAZIONE YAML (via Python/pyyaml)
+# ============================================================================
+load_config() {
+    if [ -f "$RECON_CONF" ]; then
+        if python3 -c "import yaml" 2>/dev/null; then
+            python3 - "$RECON_CONF" << 'PYEOF' 2>/dev/null || true
+import sys, os, yaml
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f)
+    if cfg:
+        for section, values in cfg.items():
+            if isinstance(values, dict):
+                for key, val in values.items():
+                    env_key = f"RECON_{section.upper()}_{key.upper()}"
+                    os.environ[env_key] = str(val)
+except Exception as e:
+    print(f"[CONFIG] Warning: {e}", file=sys.stderr)
+PYEOF
+        fi
+    fi
+}
+
+# Carica configurazione all'avvio
+load_config
 
 # ============================================================================
 # FUNZIONI UI
@@ -123,15 +165,15 @@ status_bar() {
 # FUNZIONE: Conta sessioni salvate
 # ============================================================================
 count_sessions() {
-    find "$SESSIONS_DIR" -maxdepth 1 -name "ricognizione_*" -type d 2>/dev/null | wc -l
+    find "$SESSIONS_DIR" -maxdepth 1 -name "ricognizione_*" -type d 2>/dev/null | wc -l || echo 0
 }
 
 count_json_reports() {
-    find "$SESSIONS_DIR" -maxdepth 2 -name "report.json" 2>/dev/null | wc -l
+    find "$SESSIONS_DIR" -maxdepth 2 -name "report.json" 2>/dev/null | wc -l || echo 0
 }
 
 # ============================================================================
-# FUNZIONE: Validazione IP rapida
+# FUNZIONE: Validazione IP rapida (IPv4 + hostname)
 # ============================================================================
 validate_ip_quick() {
     local ip="$1"
@@ -144,6 +186,38 @@ validate_ip_quick() {
     fi
     # Hostname: caratteri validi
     [[ "$ip" =~ ^[a-zA-Z0-9._-]+$ ]] && return 0
+    return 1
+}
+
+# ============================================================================
+# FUNZIONE: Verifica whitelist target (da recon.conf)
+# ============================================================================
+check_target_allowed() {
+    local target="$1"
+    local allowed="${RECON_SECURITY_ALLOWED_TARGETS:-}"
+    [ -z "$allowed" ] || [ "$allowed" = "[]" ] && return 0
+    # Parsing semplice: supporta CIDR e IP singoli
+    IFS=',' read -ra ALLOWED_LIST <<< "$(echo "$allowed" | tr -d '[]" ')"
+    for entry in "${ALLOWED_LIST[@]}"; do
+        [ -z "$entry" ] && continue
+        # CIDR match
+        if [[ "$entry" == */* ]]; then
+            if command -v python3 &>/dev/null; then
+                python3 -c "
+import ipaddress
+try:
+    net = ipaddress.ip_network('$entry', strict=False)
+    ip = ipaddress.ip_address('$target')
+    print(ip in net)
+except:
+    print('False')
+" 2>/dev/null | grep -q "True" && return 0
+            fi
+        else
+            [ "$target" = "$entry" ] && return 0
+        fi
+    done
+    echo -e "${RED}[-] Target $target non consentito dalla whitelist (allowed_targets in recon.conf)${RST}"
     return 1
 }
 
@@ -181,6 +255,10 @@ menu_recognize() {
             echo -e "  ${RED}Formato non valido. Inserisci un IP (es. 192.168.1.1) o hostname.${RST}"
             continue
         fi
+        # Verifica whitelist
+        if ! check_target_allowed "$TARGET_INPUT"; then
+            press_enter; return
+        fi
         break
     done
 
@@ -199,11 +277,10 @@ menu_recognize() {
         echo -e "  ${GRN}[✓] Ricognizione completata. Output salvato in: $SESSIONS_DIR${RST}"
         echo ""
 
-        # Proponi fase 2 — usa timestamp per trovare l'ultimo report
+        # Proponi fase 2 — trova l'ultimo report per timestamp
         local last_json
-        # Cerca il report più recente tra tutti quelli generati nell'ultimo minuto
-        last_json=$(find "$SESSIONS_DIR" -name "report.json" -mmin -1 2>/dev/null \
-                    | sort -t_ -k2 | tail -1)
+        last_json=$(find "$SESSIONS_DIR" -name "report.json" -printf '%T@ %p\0' 2>/dev/null \
+                    | sort -rnz | head -zn1 | cut -zd' ' -f2-)
         if [ -n "$last_json" ] && confirm "Vuoi avviare subito la Fase 2 (analyze.sh) su questo report?"; then
             run_analyze "$last_json"
         fi
@@ -388,9 +465,9 @@ menu_sessions() {
             local name; name=$(basename "$s")
             local n_files; n_files=$(find "$s" -type f | wc -l)
             local size; size=$(du -sh "$s" 2>/dev/null | cut -f1)
-            local has_json; has_json=""
+            local has_json=""
             [ -f "$s/report.json" ] && has_json="${GRN}[JSON✓]${RST}"
-            local n_cves; n_cves=""
+            local n_cves=""
             [ -f "$s/macchine_vulnerabili.txt" ] && \
                 n_cves="CVE=$(grep -c 'CVE-' "$s/macchine_vulnerabili.txt" 2>/dev/null || echo 0)"
             printf "    ${GRY}%-40s${RST}  ${YEL}%-6s${RST}  %s file  %s %s\n" \
@@ -521,9 +598,9 @@ menu_cache() {
 
     if [ "$n_entries" != "?" ] && (( n_entries > 0 )); then
         echo -e "  ${CYN}CVE in cache:${RST}"
-        python3 - <<PYEOF 2>/dev/null
-import json
-data = json.load(open("$NVD_CACHE"))
+        python3 - "$NVD_CACHE" << 'PYEOF' 2>/dev/null
+import json, sys
+data = json.load(open(sys.argv[1]))
 for cve, info in sorted(data.items()):
     print(f"    {cve:<20}  AV={info.get('av','?'):<20}  Score={info.get('score','?')}")
 PYEOF
@@ -595,10 +672,10 @@ menu_pdf() {
 
     # Verifica reportlab
     python3 -c "import reportlab" 2>/dev/null || {
-        echo -e "  ${YEL}[!] reportlab non installato. Installa con: pip3 install reportlab${RST}"
+        echo -e "  ${YEL}[!] reportlab non installato. Installa con: pip3 install --user reportlab${RST}"
         echo ""
         if confirm "Installare reportlab ora?"; then
-            pip3 install reportlab 2>/dev/null && echo -e "  ${GRN}[✓] reportlab installato${RST}" || \
+            pip3 install --user reportlab 2>/dev/null && echo -e "  ${GRN}[✓] reportlab installato${RST}" || \
                 echo -e "  ${RED}[-] Installazione fallita${RST}"
         fi
     }
@@ -696,13 +773,13 @@ menu_checksum() {
 # ============================================================================
 menu_info() {
     header
-    echo -e "  ${BLD}[8] GUIDA RAPIDA${RST}"
+    echo -e "  ${BLD}[10] GUIDA RAPIDA${RST}"
     divider
     cat << 'EOF'
 
   ┌─ FLUSSO DI LAVORO ─────────────────────────────────────────────────────┐
   │                                                                         │
-  │   1. Prima volta?  →  Opzione [4] Installazione completa                │
+  │   1. Prima volta?  →  Opzione [5] Installazione completa                │
   │                                                                         │
   │   2. Ricognizione  →  Opzione [1] Inserisci IP target                  │
   │      • Scegli modalità (SILENT / FAST / FAST&MASSIVE / SILENT&MASSIVE) │
@@ -710,10 +787,12 @@ menu_info() {
   │      • Genera: scan TCP+UDP, CVE analysis, mappa PNG, report.json      │
   │                                                                         │
   │   3. Analisi Fase 2 →  Opzione [2] Scegli report.json                  │
-  │      • Esegue: nikto, testssl, enum4linux, snmpwalk, whois             │
+  │      • Esegue: nikto, testssl, enum4linux, snmpwalk, whois, hydra      │
   │      • Output in: sessioni/analisi_YYYYMMDD_HHMMSS/                    │
   │                                                                         │
-  │   4. Storico        →  Opzione [3] Sessioni passate + pulizia          │
+  │   4. Report PDF    →  Opzione [8] Genera report PDF professionale      │
+  │                                                                         │
+  │   5. Storico       →  Opzione [4] Sessioni passate + pulizia           │
   │                                                                         │
   └─────────────────────────────────────────────────────────────────────────┘
 
@@ -734,9 +813,13 @@ menu_info() {
 
   ┌─ STRUTTURA FILE ────────────────────────────────────────────────────────┐
   │  recognize.sh        Fase 1: ricognizione TCP+UDP+CVE                  │
-  │  analyze.sh          Fase 2: nikto/testssl/enum4linux/snmpwalk         │
+  │  analyze.sh          Fase 2: nikto/testssl/enum4linux/snmpwalk/hydra   │
   │  install.sh          Setup dipendenze + aggiornamento                  │
+  │  report_pdf.sh       Generazione report PDF                            │
   │  manager.sh          Questo script                                     │
+  │  recon.conf          Configurazione YAML                               │
+  │  Makefile            Comandi rapidi (build, scan, batch, pdf)          │
+  │  Dockerfile          Containerizzazione                                │
   │  sessioni/           Tutte le directory di output                      │
   │  ~/.cache/recognize_nvd/cvss_cache.json    Cache NVD persistente      │
   └─────────────────────────────────────────────────────────────────────────┘

@@ -3,7 +3,7 @@
 # Comandi rapidi per build, scan, report e pulizia
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 1.0
+# VERSIONE: 2.0
 #
 # USO: make build          # Build immagine Docker
 #       make scan TARGET=192.168.1.1   # Scan singolo target
@@ -18,7 +18,7 @@ TARGET ?= 192.168.1.1
 FILE ?= targets.txt
 REPORT ?= sessioni/ricognizione_latest/report.json
 DOCKER_TAG ?= recon-manager:latest
-COMPOSE ?= docker-compose
+COMPOSE ?= docker compose
 
 # Colori per output
 GREEN := \033[32m
@@ -41,7 +41,10 @@ help:
 	@echo "$(GREEN)pdf$(RESET)           Genera report PDF:     make pdf REPORT=report.json"
 	@echo "$(GREEN)shell$(RESET)         Shell interattiva nel container"
 	@echo "$(GREEN)check$(RESET)         Verifica dipendenze locali"
+	@echo "$(GREEN)install$(RESET)       Installa dipendenze locali (sudo)"
 	@echo "$(GREEN)clean$(RESET)         Pulisce output Docker + sessioni vecchie"
+	@echo "$(GREEN)checksum$(RESET)      Genera checksum SHA256 degli script"
+	@echo "$(GREEN)verify$(RESET)        Verifica checksum integrità"
 	@echo ""
 
 # ── Build ──
@@ -55,7 +58,7 @@ build:
 scan:
 	@echo "$(CYAN)[*] Avvio scan su target: $(TARGET)$(RESET)"
 	@mkdir -p sessioni output targets
-	docker-compose run --rm recon ./recognize.sh $(TARGET)
+	$(COMPOSE) run --rm recon ./recognize.sh $(TARGET)
 
 # ── Batch scan ──
 .PHONY: batch
@@ -66,7 +69,7 @@ batch:
 		echo "$(RED)[-] File non trovato: $(FILE)$(RESET)"; \
 		exit 1; \
 	fi
-	docker-compose run --rm recon ./recognize.sh --batch /data/$(notdir $(FILE))
+	$(COMPOSE) run --rm recon ./recognize.sh --batch /data/$(notdir $(FILE))
 
 # ── Report PDF ──
 .PHONY: pdf
@@ -74,16 +77,16 @@ pdf:
 	@echo "$(CYAN)[*] Generazione PDF da: $(REPORT)$(RESET)"
 	@if [ ! -f "$(REPORT)" ]; then \
 		echo "$(RED)[-] Report non trovato: $(REPORT)$(RESET)"; \
-		echo "$(YELLOW}[!] Cerca con: find sessioni -name report.json$(RESET)"; \
+		echo "$(YELLOW)[!] Cerca con: find sessioni -name report.json$(RESET)"; \
 		exit 1; \
 	fi
-	docker-compose run --rm recon ./report_pdf.sh $(REPORT)
+	$(COMPOSE) run --rm recon ./report_pdf.sh $(abspath $(REPORT))
 
 # ── Shell interattiva ──
 .PHONY: shell
 shell:
 	@echo "$(CYAN)[*] Shell interattiva nel container...$(RESET)"
-	docker-compose run --rm recon /bin/bash
+	$(COMPOSE) run --rm recon /bin/bash
 
 # ── Verifica dipendenze (locale) ──
 .PHONY: check
@@ -96,6 +99,12 @@ check:
 			echo "  $(YELLOW)⚠️  $$tool$(RESET) (opzionale)"; \
 		fi; \
 	done
+
+# ── Installazione locale ──
+.PHONY: install
+install:
+	@echo "$(CYAN)[*] Installazione dipendenze locali...$(RESET)"
+	sudo ./install.sh
 
 # ── Clean ──
 .PHONY: clean
@@ -123,5 +132,5 @@ verify:
 			echo "$(GREEN)[✓] Tutti i checksum corrispondono$(RESET)" || \
 			echo "$(RED)[-] Attenzione: alcuni file sono stati modificati!$(RESET)"; \
 	else \
-		echo "$(YELLOW}[!] checksums.sha256 non trovato. Genera con: make checksum$(RESET)"; \
+		echo "$(YELLOW)[!] checksums.sha256 non trovato. Genera con: make checksum$(RESET)"; \
 	fi

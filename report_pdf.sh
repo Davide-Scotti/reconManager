@@ -2,18 +2,19 @@
 ################################################################################
 # SCRIPT: report_pdf.sh
 # DESCRIZIONE: Genera un report PDF professionale dal report.json di recognize.sh
-#              Include executive summary, tabella vulnerabilità, analisi host.
+#              Include executive summary, tabella vulnerabilità, analisi host,
+#              note e limitazioni.
 #
-# DIPENDENZE: python3 + reportlab (pip install reportlab)
+# DIPENDENZE: python3 + reportlab (pip3 install --user reportlab)
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 1.0
-# DATA: 2026-06-17
+# VERSIONE: 2.0
+# DATA: 2026-06-22
 #
 # USO: ./report_pdf.sh <report.json> [output.pdf]
 ################################################################################
 
-set -u -o pipefail
+set -euo pipefail
 
 JSON_FILE="${1:-}"
 if [ -z "$JSON_FILE" ] || [ ! -f "$JSON_FILE" ]; then
@@ -24,16 +25,17 @@ fi
 
 OUTPUT_PDF="${2:-${JSON_FILE%.json}_report.pdf}"
 
-# Verifica reportlab
+# Verifica reportlab (installazione --user per utente singolo)
 python3 -c "import reportlab" 2>/dev/null || {
     echo -e "\e[33m[!] reportlab non installato. Installazione in corso...\e[0m"
-    pip3 install reportlab 2>/dev/null || {
-        echo -e "\e[31m[-] Errore: installare reportlab con: pip3 install reportlab\e[0m"
+    pip3 install --user reportlab 2>/dev/null || {
+        echo -e "\e[31m[-] Errore: installare reportlab con: pip3 install --user reportlab\e[0m"
         exit 1
     }
 }
 
-exec python3 - "$JSON_FILE" "$OUTPUT_PDF" << 'PYEOF'
+# Passa i parametri a Python via sys.argv (SICURO)
+python3 - "$JSON_FILE" "$OUTPUT_PDF" << 'PYEOF'
 import json, sys, os, textwrap
 from datetime import datetime
 
@@ -49,8 +51,8 @@ from reportlab.platypus import (
 )
 from reportlab.platypus.flowables import HRFlowable
 
-# ── Load JSON ──
-with open(sys.argv[1]) as f:
+# ── Load JSON (con encoding utf-8 esplicito) ──
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
     data = json.load(f)
 
 meta = data.get("meta", {})
@@ -230,6 +232,7 @@ toc_items = [
     "3. Dettaglio Host Analizzati",
     "4. Metodologia",
     "5. Allegati Tecnici",
+    "6. Note e Limitazioni",
 ]
 for item in toc_items:
     story.append(Paragraph(item, style_body))
@@ -490,9 +493,12 @@ method_steps = [
          "Livello 2: CVSS Attack Vector (da NVD o cache locale)",
          "Livello 3: Configurazione reale (SSH algo, HSTS, server-status)"
      ]),
-    ("<b>Fase 4 - Priorizzazione:</b> Calcolo score composito (0-100) e "
+    ("<b>Fase 4 - Analisi Approfondita:</b> Esecuzione di nikto (web), "
+     "testssl.sh (SSL/TLS), enum4linux (SMB), snmpwalk (SNMP), "
+     "hydra (SSH bruteforce), whois/PTR lookup."),
+    ("<b>Fase 5 - Priorizzazione:</b> Calcolo score composito (0-100) e "
      "classificazione in critica/media/bassa."),
-    ("<b>Fase 5 - Report:</b> Generazione report JSON, TXT, PNG (mappa rete) e PDF."),
+    ("<b>Fase 6 - Report:</b> Generazione report JSON, TXT, PNG (mappa rete) e PDF."),
 ]
 
 for step in method_steps:
@@ -564,6 +570,52 @@ story.append(Paragraph(
 ))
 story.append(Paragraph(
     "Classificazione: CONFIDENZIALE",
+    style_footer
+))
+
+story.append(PageBreak())
+
+# ════════════════════════════════════════════════════════════════════
+# 6. NOTE E LIMITAZIONI
+# ════════════════════════════════════════════════════════════════════
+story.append(Paragraph("6. Note e Limitazioni", style_h1))
+
+note_items = [
+    ("<b>Copertura:</b> L'analisi è limitata agli host e servizi rilevati "
+     "durante la fase di ricognizione. Host non rispondenti o protetti da "
+     "firewall potrebbero non essere stati inclusi."),
+    ("<b>Falsi positivi:</b> Il sistema di scoring a 3 livelli riduce ma "
+     "non elimina la possibilità di falsi positivi. Si raccomanda verifica "
+     "manuale delle vulnerabilità critiche."),
+    ("<b>Tempistiche:</b> Le vulnerabilità sono riferite alla data di "
+     "scansione. Nuove vulnerabilità potrebbero essere scoperte "
+     "successivamente."),
+    ("<b>Tool esterni:</b> Alcuni tool (nikto, enum4linux, hydra) sono "
+     "opzionali. La loro assenza riduce la copertura dell'analisi."),
+    ("<b>Rate limiting NVD:</b> Senza API key NVD, il rate limiting è "
+     "limitato a 5 richieste ogni 30 secondi. Si consiglia di registrare "
+     "una API key gratuita all'indirizzo: "
+     "https://nvd.nist.gov/developers/request-an-api-key"),
+]
+
+for item in note_items:
+    story.append(Paragraph(item, style_body))
+    story.append(Spacer(1, 3*mm))
+
+story.append(Spacer(1, 1*cm))
+story.append(HRFlowable(width="100%", color=COLOR_PRIMARY, thickness=1))
+story.append(Spacer(1, 5*mm))
+story.append(Paragraph(
+    f"Report generato il {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+    f"da Recon Manager v{meta.get('version','?')}",
+    style_footer
+))
+story.append(Paragraph(
+    "Scotti Davide — Università Statale degli Studi di Milano",
+    style_footer
+))
+story.append(Paragraph(
+    "Classificazione: CONFIDENZIALE — Il presente documento è coperto da segreto professionale",
     style_footer
 ))
 

@@ -2,14 +2,12 @@
 # docker-compose.yml — Recon Manager
 # 
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 1.0
+# VERSIONE: 2.0
 #
-# USO: docker-compose run --rm recon scan TARGET=192.168.1.1
-#       docker-compose run --rm recon batch TARGETS=/data/targets.txt
-#       docker-compose run --rm recon pdf /app/sessioni/ricognizione_*/report.json
+# USO: docker compose run --rm recon scan TARGET=192.168.1.1
+#       docker compose run --rm recon batch TARGETS=/data/targets.txt
+#       docker compose run --rm recon pdf /app/sessioni/ricognizione_*/report.json
 ################################################################################
-
-version: "3.8"
 
 services:
   recon:
@@ -21,6 +19,7 @@ services:
     network_mode: "host"
     stdin_open: true
     tty: true
+    restart: "no"
     volumes:
       # Output delle sessioni (persistente)
       - ./sessioni:/app/sessioni

@@ -2,24 +2,27 @@
 ################################################################################
 # SCRIPT: install.sh
 # DESCRIZIONE: Installazione e aggiornamento di tutte le dipendenze
-#              necessarie per recognize.sh e analyze.sh.
+#              necessarie per recognize.sh, analyze.sh e report_pdf.sh.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 1.4
-# DATA: 2026-06-08
+# VERSIONE: 2.0
+# DATA: 2026-06-22
 #
 # USO: sudo ./install.sh [--update-only] [--check-only]
 ################################################################################
 
-set -u
+set -euo pipefail
 
 # ============================================================================
 # CONFIGURAZIONE
 # ============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTSSL_URL="https://github.com/drwetter/testssl.sh/releases/latest/download/testssl.sh"
 TESTSSL_DEST="/usr/local/bin/testssl.sh"
+TESTSSL_CHECKSUM_URL="https://github.com/drwetter/testssl.sh/releases/latest/download/testssl.sh.sha256"
 INSTALL_LOG="/var/log/recon_install.log"
 MIN_DISK_MB=500
+NVD_API_KEY_URL="https://nvd.nist.gov/developers/request-an-api-key"
 
 RED='\e[31m'; YEL='\e[33m'; GRN='\e[32m'; CYN='\e[36m'; RST='\e[0m'; BLD='\e[1m'
 
@@ -63,12 +66,17 @@ check_os() {
 
 check_internet() {
     log "INFO" "Verifica connessione internet..."
-    if ! ping -c 1 -W 3 8.8.8.8 &>/dev/null 2>&1; then
-        log "WARN" "Nessuna connessione internet. Solo installazione locale disponibile."
-        return 1
+    # Fallback: prima ping, poi curl
+    if ping -c 1 -W 3 8.8.8.8 &>/dev/null 2>&1; then
+        log "OK" "Connessione internet disponibile"
+        return 0
     fi
-    log "OK" "Connessione internet disponibile"
-    return 0
+    if curl -s --max-time 5 https://google.com &>/dev/null; then
+        log "OK" "Connessione internet disponibile (via curl)"
+        return 0
+    fi
+    log "WARN" "Nessuna connessione internet. Solo installazione locale disponibile."
+    return 1
 }
 
 check_disk_space() {
@@ -81,11 +89,21 @@ check_disk_space() {
     log "OK" "Spazio disco: ${available_mb}MB disponibili"
 }
 
+wait_for_apt() {
+    local timeout=120
+    while fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        sleep 2
+        ((timeout-=2))
+        [ "$timeout" -le 0 ] && { log "WARN" "Timeout attesa apt (120s)"; return 1; }
+    done
+    return 0
+}
+
 # ============================================================================
-# LISTA PACCHETTI (solo quelli realmente necessari)
+# LISTA PACCHETTI
 # ============================================================================
 REQUIRED_PKGS=(
-    nmap curl bind9-dnsutils netcat-openbsd graphviz iputils-ping python3
+    nmap curl bind9-dnsutils netcat-openbsd graphviz iputils-ping python3 python3-pip
 )
 OPTIONAL_PKGS=(
     nikto enum4linux snmp whois hydra
@@ -128,20 +146,34 @@ install_packages() {
 }
 
 # ============================================================================
-# INSTALLA TESTSSL.SH
+# INSTALLA TESTSSL.SH CON VERIFICA CHECKSUM
 # ============================================================================
 install_testssl() {
     section "testssl.sh (SSL/TLS analyzer)"
     if [ -f "$TESTSSL_DEST" ]; then
-        log "SKIP" "testssl.sh già presente in $TESTSSL_DEST"
+        # Verifica se l'ultima versione
+        local local_ver remote_ver
+        local_ver=$("$TESTSSL_DEST" --version 2>/dev/null | head -1 || echo "0")
+        log "SKIP" "testssl.sh già presente in $TESTSSL_DEST ($local_ver)"
         return 0
     fi
     log "INFO" "Download testssl.sh da GitHub..."
-    if timeout 30 wget -q "$TESTSSL_URL" -O "$TESTSSL_DEST" 2>/dev/null; then
+    if timeout 30 wget -q "$TESTSSL_URL" -O "${TESTSSL_DEST}.tmp" 2>/dev/null; then
+        # Tentativo verifica checksum (non bloccante)
+        if timeout 10 wget -q "$TESTSSL_CHECKSUM_URL" -O /tmp/testssl.sha256 2>/dev/null; then
+            if sha256sum -c /tmp/testssl.sha256 --quiet 2>/dev/null; then
+                log "OK" "Checksum testssl.sh verificato"
+            else
+                log "WARN" "Checksum testssl.sh NON corrisponde — verificare manualmente"
+            fi
+            rm -f /tmp/testssl.sha256
+        fi
+        mv "${TESTSSL_DEST}.tmp" "$TESTSSL_DEST"
         chmod +x "$TESTSSL_DEST"
         log "OK" "testssl.sh installato in $TESTSSL_DEST"
     else
         log "WARN" "Download testssl.sh fallito (rete o URL non raggiungibile)"
+        rm -f "${TESTSSL_DEST}.tmp"
     fi
 }
 
@@ -177,9 +209,18 @@ check_only() {
         printf "    ${YEL}⚠️   %-25s${RST}  (opzionale)\n" "testssl.sh"
     fi
 
+    # Verifica pyyaml per parsing config
+    if python3 -c "import yaml" 2>/dev/null; then
+        printf "    ${GRN}✅  %-25s${RST}\n" "python3-yaml (pyyaml)"
+    else
+        printf "    ${YEL}⚠️   %-25s${RST}  (opzionale, per parsing config)\n" "python3-yaml"
+    fi
+
     echo ""
     if [ "$all_ok" = true ]; then
         log "OK" "Tutte le dipendenze obbligatorie sono soddisfatte"
+        echo -e "\n  ${GRN}✅ Sistema pronto per l'uso.${RST}"
+        echo -e "  ${CYN}Prossimo passo: ./manager.sh${RST}"
     else
         log "WARN" "Alcune dipendenze obbligatorie mancanti — esegui: sudo ./install.sh"
     fi
@@ -191,6 +232,7 @@ check_only() {
 update_packages() {
     section "Aggiornamento pacchetti"
     log "INFO" "apt-get update..."
+    wait_for_apt || true
     apt-get update -q >> "$INSTALL_LOG" 2>&1
     log "INFO" "Aggiornamento pacchetti installati..."
     apt-get upgrade -y -q >> "$INSTALL_LOG" 2>&1
@@ -218,7 +260,7 @@ update_packages() {
             wget -q "https://raw.githubusercontent.com/vulnersCom/nmap-vulners/master/vulners.nse" \
                 -O /usr/share/nmap/scripts/vulners.nse >> "$INSTALL_LOG" 2>&1 && \
                 log "OK" "vulners.nse installato" || \
-                log "WARN" "Download vulners.nse fallito"
+                log "WARN" "Download vulners.nse fallito (non bloccante)"
             nmap --script-updatedb >> "$INSTALL_LOG" 2>&1 || true
         else
             log "SKIP" "vulners.nse già presente"
@@ -244,7 +286,6 @@ post_install_config() {
         cache_dir="/home/$SUDO_USER/.cache/recognize_nvd"
         mkdir -p "$cache_dir"
         echo '{}' > "$cache_dir/cvss_cache.json"
-        # Determina il gruppo primario dell'utente (non assume sudo_user=same group)
         local user_group
         user_group=$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")
         chown -R "$SUDO_USER:$user_group" "$cache_dir"
@@ -255,9 +296,13 @@ post_install_config() {
     fi
     log "OK" "Cache NVD inizializzata in $cache_dir"
 
-    for script in recognize.sh analyze.sh manager.sh; do
-        [ -f "$script" ] && chmod +x "$script" && log "OK" "$script → chmod +x"
+    for script in recognize.sh analyze.sh manager.sh install.sh report_pdf.sh; do
+        [ -f "$SCRIPT_DIR/$script" ] && chmod +x "$SCRIPT_DIR/$script" && log "OK" "$script → chmod +x"
     done
+
+    # Installa pyyaml per parsing configurazione
+    log "INFO" "Installazione pyyaml (parsing config)..."
+    pip3 install --quiet pyyaml 2>/dev/null && log "OK" "pyyaml installato" || log "WARN" "pyyaml non installato (config parsing fallback a default)"
 }
 
 # ============================================================================
@@ -265,7 +310,7 @@ post_install_config() {
 # ============================================================================
 clear
 echo -e "${CYN}╔═══════════════════════════════════════════════════════════════╗${RST}"
-echo -e "${CYN}║  install.sh — Setup dipendenze recognize/analyze             ║${RST}"
+echo -e "${CYN}║  install.sh v2.0 — Setup dipendenze recognize/analyze        ║${RST}"
 echo -e "${CYN}║  Autore: Scotti Davide — UniMi                               ║${RST}"
 echo -e "${CYN}╚═══════════════════════════════════════════════════════════════╝${RST}"
 echo ""
@@ -277,6 +322,12 @@ for arg in "$@"; do
         --check-only)  MODE="check"  ;;
         --help|-h)
             echo "Uso: sudo $0 [--update-only] [--check-only]"
+            echo ""
+            echo "  --update-only  Aggiorna pacchetti, nmap scripts e testssl.sh"
+            echo "  --check-only   Verifica stato dipendenze senza modifiche"
+            echo ""
+            echo "Registrazione API key NVD (gratuita):"
+            echo "  $NVD_API_KEY_URL"
             exit 0 ;;
     esac
 done
@@ -303,10 +354,12 @@ if [ "$MODE" = "update" ]; then
     update_packages
     post_install_config
     log "OK" "Aggiornamento completato"
+    echo -e "\n${GRN}[✓] Sistema aggiornato. Esegui: ./manager.sh${RST}"
     exit 0
 fi
 
 section "Aggiornamento indice apt"
+wait_for_apt || true
 apt-get update -q >> "$INSTALL_LOG" 2>&1
 log "OK" "Indice aggiornato"
 

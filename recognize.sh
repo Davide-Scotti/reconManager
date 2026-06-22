@@ -7,8 +7,8 @@
 #              parallelizzazione host, output JSON e mappa di rete.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 3.2
-# DATA: 2026-06-15
+# VERSIONE: 3.3
+# DATA: 2026-06-22
 #
 # USO: ./recognize.sh <IP_TARGET>
 #       ./recognize.sh --batch <file_targets.txt>
@@ -18,8 +18,7 @@
 # OUTPUT: Directory con report testuali, JSON, log, mappa PNG e priorità.
 ################################################################################
 
-set -u -o pipefail
-ERR_HANDLER_SET=false
+set -euo pipefail
 
 # ============================================================================
 # CONFIGURAZIONE DEFAULT (sovrascritta da select_mode)
@@ -74,7 +73,6 @@ error_handler() {
     local cmd=$2
     local rc=$3
     echo -e "\e[31m[!] ERRORE (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
-    # Non uscire automaticamente — logga ma continua se possibile
 }
 trap 'error_handler $LINENO "$BASH_COMMAND" $?' ERR
 
@@ -101,7 +99,7 @@ show_disclaimer() {
 EOF
     echo -e "\e[0m"
     read -rp "  Ho letto e accetto. Confermo di operare su rete autorizzata [si/no]: " accept
-    [[ "$accept" != "si" ]] && { echo -e "\e[31m  Uscita.\e[0m"; exit 0; }
+    [[ "$accept" != "si" ]] && { echo -e "\e[31m  Uscita.\e[0m"; exit 1; }
     echo ""
 }
 
@@ -121,7 +119,7 @@ validate_target() {
         for oct in $a $b $c $d; do
             if (( oct > 255 )); then
                 echo -e "\e[31m[-] IP non valido: ottetto $oct fuori range (0-255)\e[0m"
-                exit 1
+                return 1
             fi
         done
         echo -e "\e[32m   [✓] Formato IP valido\e[0m"
@@ -134,7 +132,7 @@ validate_target() {
             resolved=$(host "$target" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}')
             if [ -z "$resolved" ]; then
                 echo -e "\e[31m\n[-] '$target' non è un IP valido né un hostname risolvibile\e[0m"
-                exit 1
+                return 1
             fi
             retarget="$resolved"
             echo -e "\r\e[32m   [✓] Hostname risolto a: $retarget                    \e[0m"
@@ -230,11 +228,14 @@ select_mode() {
 # ============================================================================
 cleanup_and_exit() {
     echo -e "\n\n\e[31m[!] Interrotto dall'utente. Pulizia in corso...\e[0m"
-    jobs -p | xargs -r kill 2>/dev/null || true
+    # Kill tutti i processi figli ricorsivamente
+    pkill -P $$ 2>/dev/null || true
     wait 2>/dev/null || true
     rm -f "$OUTPUT_DIR"/*_raw.txt 2>/dev/null || true
     rm -f "$OUTPUT_DIR"/*.gnmap 2>/dev/null || true
     find "$OUTPUT_DIR" -name "web_header_*.txt" -size 0 -delete 2>/dev/null || true
+    # Pulisci temp file
+    rm -f /tmp/recon_nvd_av_*.tmp 2>/dev/null || true
     echo -e "\e[32m[+] Pulizia completata. Uscita.\e[0m"
     exit 130
 }
@@ -304,7 +305,6 @@ init_nvd_cache() {
 # Batch read: dato un array di CVE, ritorna solo quelle non in cache
 nvd_cache_get_batch() {
     local cve_list=("$@")
-    # Usa Python per fare un'unica lettura del file
     python3 - "$NVD_CACHE_FILE" "${cve_list[@]}" << 'PYEOF' 2>/dev/null || true
 import json, sys
 cache_file = sys.argv[1]
@@ -327,7 +327,6 @@ PYEOF
 nvd_cache_set_batch() {
     local cache_file="$1"
     shift
-    # Argomenti passati come coppie: cve_id,av,score,severity
     python3 - "$cache_file" "$@" << 'PYEOF' 2>/dev/null || true
 import json, sys
 cache_file = sys.argv[1]
@@ -381,7 +380,7 @@ nvd_rate_limit_wait() {
 }
 
 # ============================================================================
-# FUNZIONE: Fetch CVSS da NVD API (con cache batch)
+# FUNZIONE: Fetch CVSS da NVD API (con cache batch e retry)
 # ============================================================================
 fetch_cvss_from_nvd_batch() {
     local output_file="$1"
@@ -401,7 +400,6 @@ fetch_cvss_from_nvd_batch() {
 
     while read -r line; do
         if [[ "$line" == CVEHIT\|* ]]; then
-            # cache hit: CVEHIT|cve|av|score|severity
             local cve_hit
             cve_hit=$(echo "$line" | cut -d'|' -f2)
             local av_hit
@@ -410,7 +408,6 @@ fetch_cvss_from_nvd_batch() {
             score_hit=$(echo "$line" | cut -d'|' -f4)
             echo "   [NVD] ✓ Cache hit: $cve_hit → AV=$av_hit Score=$score_hit" >> "$output_file"
             log_message "DEBUG" "Cache hit NVD: $cve_hit"
-            # Salva in results_map per riferimento
             results_map+=("$cve_hit|$av_hit")
         elif [[ "$line" == CVEMISS\|* ]]; then
             local cve_miss
@@ -419,26 +416,49 @@ fetch_cvss_from_nvd_batch() {
         fi
     done < <(nvd_cache_get_batch "${cve_list[@]}")
 
-    # Cache hit: imposta le variabili per il chiamante
-    # (le variabili vengono esportate via file temporaneo)
+    # Cache hit: salva in file temporaneo con mktemp
     local av_map_file
-    av_map_file=$(mktemp)
+    av_map_file=$(mktemp /tmp/recon_nvd_av_XXXXXX.tmp)
     for entry in "${results_map[@]}"; do
         echo "$entry" >> "$av_map_file"
     done
 
-    # Cache miss: fetch da NVD con rate limit
+    # Cache miss: fetch da NVD con rate limit e retry
     local batch_updates=()
     for cve in "${cache_miss[@]}"; do
         nvd_rate_limit_wait
 
-        local response
-        response=$(timeout "$TIMEOUT_NVD_API" curl -s \
-            "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=$cve" 2>/dev/null)
+        local response=""
+        local retry=0
+        local http_code=0
 
-        if [ -z "$response" ]; then
-            echo "   [NVD] API timeout o non raggiungibile per $cve" >> "$output_file"
-            log_message "WARN" "Timeout API NVD per $cve"
+        while [ $retry -lt $NVD_API_RETRIES ]; do
+            response=$(timeout "$TIMEOUT_NVD_API" curl -s -w "%{http_code}" \
+                "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=$cve" 2>/dev/null) || true
+            
+            http_code="${response: -3}"
+            response="${response:0:${#response}-3}"
+
+            if [ "$http_code" = "200" ]; then
+                break
+            elif [ "$http_code" = "429" ]; then
+                local backoff=$(( (2 ** retry) + RANDOM % 5 ))
+                log_message "WARN" "NVD rate limited (429) per $cve, retry in ${backoff}s (tentativo $((retry+1))/$NVD_API_RETRIES)"
+                sleep "$backoff"
+                retry=$(( retry + 1 ))
+            elif [ "$http_code" = "503" ]; then
+                local backoff=$(( (2 ** retry) + RANDOM % 3 ))
+                log_message "WARN" "NVD service unavailable (503) per $cve, retry in ${backoff}s"
+                sleep "$backoff"
+                retry=$(( retry + 1 ))
+            else
+                break
+            fi
+        done
+
+        if [ -z "$response" ] || [ "$http_code" != "200" ]; then
+            echo "   [NVD] API $([ "$http_code" != "000" ] && echo "HTTP $http_code" || echo "timeout") per $cve" >> "$output_file"
+            log_message "WARN" "HTTP $http_code da NVD per $cve"
             continue
         fi
 
@@ -488,7 +508,7 @@ check_ssh_config() {
     local weak_algo=0
     local algo_output
     algo_output=$(timeout "$TIMEOUT_NMAP_WEAK" nmap -p 22 --script ssh2-enum-algos \
-        -sV "$host" 2>/dev/null)
+        -sV "$host" 2>/dev/null || true)
     weak_algo=$(echo "$algo_output" | grep -ciE "diffie-hellman-group1-sha1|ssh-rsa|ssh-dss" || true)
 
     if [ "${weak_algo:-0}" -gt 0 ]; then
@@ -575,7 +595,6 @@ analizza_cve() {
     if [ -n "$av" ] && [ "$av" != "UNKNOWN" ]; then
         echo "   ✓ Attack Vector (cache locale): $av" >> "$output_file"
     elif [ -n "${CVE_AV_MAP_FETCHED:-}" ]; then
-        # Av viene dalla fetch batch NVD via file temporaneo
         if [ -f "${NVD_AV_MAP_FILE:-}" ]; then
             local fetched_av
             fetched_av=$(grep "^$cve_id|" "$NVD_AV_MAP_FILE" 2>/dev/null | cut -d'|' -f2 || true)
@@ -675,7 +694,8 @@ scan_tcp_host() {
     local timeout_sec=1800
     [ "$USE_ALL_PORTS" = true ] && timeout_sec=7200
 
-    timeout "$timeout_sec" "${cmd[@]}" > "$raw_out" 2>/dev/null
+    log_message "DEBUG" "Avvio scan TCP su $host (timeout ${timeout_sec}s)"
+    timeout "$timeout_sec" "${cmd[@]}" > "$raw_out" 2>>"$OUTPUT_DIR/nmap_errors.log"
     local rc=$?
     if [ $rc -eq 124 ]; then
         log_message "WARN" "Scan TCP su $host: timeout dopo ${timeout_sec}s"
@@ -699,7 +719,8 @@ scan_udp_host() {
     [ -n "$NMAP_SCRIPTS" ] && cmd+=(--script="$NMAP_SCRIPTS")
     cmd+=("$host")
 
-    timeout 600 "${cmd[@]}" > "$out" 2>/dev/null
+    log_message "DEBUG" "Avvio scan UDP su $host"
+    timeout 600 "${cmd[@]}" > "$out" 2>>"$OUTPUT_DIR/nmap_errors.log"
     local rc=$?
     if [ $rc -eq 124 ]; then
         log_message "WARN" "Scan UDP su $host: timeout dopo 600s"
@@ -712,6 +733,23 @@ scan_udp_host() {
             timeout 5 snmpwalk -v2c -c public "$host" system 2>/dev/null | head -10 >> "$out"
         fi
     fi
+}
+
+# ============================================================================
+# FUNZIONE: Lock per scrittura file condivisi
+# ============================================================================
+write_lock() {
+    local lock_file="$1"
+    local timeout=30
+    while ! mkdir "${lock_file}.lock" 2>/dev/null; do
+        sleep 0.1
+        ((timeout--))
+        [ "$timeout" -le 0 ] && return 1
+    done
+}
+
+write_unlock() {
+    rmdir "$1.lock" 2>/dev/null || true
 }
 
 # ============================================================================
@@ -767,12 +805,16 @@ analyze_host_results() {
     if grep -qi "CVE-" "$scan_file" 2>/dev/null; then
         cve_present=true
         echo -e "\e[31m   [!] Vulnerabilità potenziali rilevate!\e[0m"
+
+        # Lock per scrittura su file condivisi
+        write_lock "$OUTPUT_DIR/.report_vuln_lock"
         {
             echo ""
             echo "[HOST] -> $host"
             echo "OS RILEVATO: $os_detected"
             echo "CRITICITÀ INDIVIDUATE:"
         } >> "$REPORT_VULN"
+        write_unlock "$OUTPUT_DIR/.report_vuln_lock"
 
         mapfile -t cve_list < <(grep -oE "CVE-[0-9]{4}-[0-9]{4,}" "$scan_file" | sort -u)
 
@@ -786,19 +828,26 @@ analyze_host_results() {
 
         for cve in "${cve_list[@]}"; do
             local score
-            score=$(grep -A1 "$cve" "$scan_file" | grep -oE "[0-9]+\.[0-9]" | head -1)
+            score=$(grep -A1 "$cve" "$scan_file" | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
+            write_lock "$OUTPUT_DIR/.report_vuln_lock"
             echo "     $cve ${score:-N/A}" >> "$REPORT_VULN"
-            analizza_cve "$host" "$software" "$version" "$cve" "$REPORT_ANALISI"
+            write_unlock "$OUTPUT_DIR/.report_vuln_lock"
+            analizza_cve "$host" "$software" "$version" "$cve" "$REPORT_ANALISI" || true
         done
+        write_lock "$OUTPUT_DIR/.report_vuln_lock"
         echo "------------------------------------------------------------------" >> "$REPORT_VULN"
+        write_unlock "$OUTPUT_DIR/.report_vuln_lock"
 
         echo -e "\e[36m   └─ CVE trovate:\e[0m"
         grep -oE "CVE-[0-9]{4}-[0-9]{4,}" "$scan_file" | sort -u | while read -r cve; do
             local score color
-            score=$(grep -A1 "$cve" "$scan_file" | grep -oE "[0-9]+\.[0-9]" | head -1)
-            if awk -v s="${score:-0}" 'BEGIN{exit !(s>=7.0)}'; then color="\e[31m"
-            elif awk -v s="${score:-0}" 'BEGIN{exit !(s>=4.0)}'; then color="\e[33m"
-            else color="\e[32m"
+            score=$(grep -A1 "$cve" "$scan_file" | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
+            if python3 -c "exit(0 if float('${score:-0}') >= 7.0 else 1)" 2>/dev/null; then
+                color="\e[31m"
+            elif python3 -c "exit(0 if float('${score:-0}') >= 4.0 else 1)" 2>/dev/null; then
+                color="\e[33m"
+            else
+                color="\e[32m"
             fi
             echo -e "      └─ ${color}$cve\e[0m (score: ${score:-N/A})"
         done
@@ -853,20 +902,23 @@ run_tests() {
     local passed=0 failed=0
 
     echo "Test 1: clean_nmap_output" >> "$TEST_LOG"
-    local t1="/tmp/test_nmap_$$.txt"
+    local t1
+    t1=$(mktemp /tmp/test_nmap_XXXXXX.txt)
     printf "Stats: 0:00:01 elapsed\nNmap scan report for 127.0.0.1\nNot shown: 998 closed\n" > "$t1"
     clean_nmap_output "$t1"
     if grep -q "Stats:" "$t1"; then echo "FAIL" >> "$TEST_LOG"; ((failed++)); else echo "PASS" >> "$TEST_LOG"; ((passed++)); fi
     rm -f "$t1"
 
     echo "Test 2: analizza_cve cache" >> "$TEST_LOG"
-    local t2="/tmp/test_analisi_$$.txt"
-    analizza_cve "127.0.0.1" "OpenSSH" "8.9p1 Ubuntu-3" "CVE-2021-44228" "$t2"
+    local t2
+    t2=$(mktemp /tmp/test_analisi_XXXXXX.txt)
+    analizza_cve "127.0.0.1" "OpenSSH" "8.9p1 Ubuntu-3" "CVE-2021-44228" "$t2" || true
     if grep -q "NETWORK" "$t2"; then echo "PASS" >> "$TEST_LOG"; ((passed++)); else echo "FAIL" >> "$TEST_LOG"; ((failed++)); fi
     rm -f "$t2"
 
     echo "Test 3: nvd_cache set/get batch" >> "$TEST_LOG"
-    local test_cache="/tmp/test_cache_$$.json"
+    local test_cache
+    test_cache=$(mktemp /tmp/test_cache_XXXXXX.json)
     echo '{}' > "$test_cache"
     nvd_cache_set_batch "$test_cache" "CVE-TEST-0001" "LOCAL" "5.5" "MEDIUM"
     local cached_val
@@ -879,7 +931,7 @@ run_tests() {
 }
 
 # ============================================================================
-# FUNZIONE: Generazione report JSON
+# FUNZIONE: Generazione report JSON (SICURA — passa path via sys.argv)
 # ============================================================================
 generate_json_report() {
     local json_file="$OUTPUT_DIR/report.json"
@@ -890,19 +942,19 @@ generate_json_report() {
     export RECOGNIZE_OUTDIR="$OUTPUT_DIR"
     export RECOGNIZE_JSON_OUT="$json_file"
 
-    python3 - <<'PYEOF'
-import json, os, re
+    python3 - "$OUTPUT_DIR" "$json_file" << 'PYEOF'
+import json, os, re, sys
 from datetime import datetime
 
+out_dir = sys.argv[1]
+json_out = sys.argv[2]
 target = os.environ.get("RECOGNIZE_TARGET", "unknown")
 mode   = os.environ.get("RECOGNIZE_MODE", "?")
-out_dir = os.environ.get("RECOGNIZE_OUTDIR", ".")
-json_out = os.environ.get("RECOGNIZE_JSON_OUT", "report.json")
 
 report = {
     "meta": {
         "tool": "recognize.sh",
-        "version": "3.2",
+        "version": "3.3",
         "author": "Scotti Davide - Universita Statale di Milano",
         "generated": datetime.now().isoformat(),
         "target": target,
@@ -1012,8 +1064,13 @@ generate_csv_report() {
                 local cve score priority verdetto host_line
                 cve=$(echo "$line" | grep -oE "CVE-[0-9]{4}-[0-9]{4,}")
                 score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1)
-                priority=$(awk -v s="${score:-0}" \
-                    'BEGIN{if(s>=7.0)print "CRITICA";else if(s>=4.0)print "MEDIA";else print "BASSA"}')
+                priority=$(python3 -c "
+import sys
+s = float('${score:-0}')
+if s >= 7.0: print('CRITICA')
+elif s >= 4.0: print('MEDIA')
+else: print('BASSA')
+" 2>/dev/null || echo "N/D")
                 verdetto=$(grep -A20 "$cve" "$REPORT_ANALISI" 2>/dev/null \
                     | grep "VERDETTO" | head -1 | sed 's/.*\] //;s/ - /;/' || echo "N/D")
                 echo "${priority};${cve};${score:-N/A};${TARGET};${OS_DETECTED:-Sconosciuto};${verdetto}"
@@ -1065,13 +1122,18 @@ Target: $TARGET
 EOF
 
     if [ -f "$REPORT_VULN" ]; then
-        local tmp="$OUTPUT_DIR/temp_prio_$$.txt"
+        local tmp
+        tmp=$(mktemp /tmp/recon_prio_XXXXXX.txt)
         grep -E "CVE-[0-9]{4}-[0-9]{4,}" "$REPORT_VULN" | while read -r line; do
             local cve score priority verdetto
             cve=$(echo "$line"   | grep -oE "CVE-[0-9]{4}-[0-9]{4,}")
             score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1)
-            priority=$(awk -v s="${score:-0}" \
-                'BEGIN{if(s>=7.0)print "🔴 CRITICA";else if(s>=4.0)print "🟡 MEDIA";else print "🟢 BASSA"}')
+            priority=$(python3 -c "
+s = float('${score:-0}')
+if s >= 7.0: print('🔴 CRITICA')
+elif s >= 4.0: print('🟡 MEDIA')
+else: print('🟢 BASSA')
+" 2>/dev/null || echo "N/D")
             verdetto=$(grep -A20 "$cve" "$REPORT_ANALISI" 2>/dev/null \
                 | grep "VERDETTO" | head -1 | cut -d' ' -f2- || echo "N/D")
             echo "${score:-0}|$priority|$cve|$verdetto" >> "$tmp"
@@ -1147,7 +1209,7 @@ scan_single_target() {
     echo -ne "\e[36m   [⏳] Scansione in corso...\e[0m"
     # Timeout globale per scansione iniziale
     local init_timeout=3600
-    timeout "$init_timeout" "${NMAP_INITIAL[@]}" > "$OUTPUT_DIR/target_initial_raw.txt" 2>/dev/null
+    timeout "$init_timeout" "${NMAP_INITIAL[@]}" > "$OUTPUT_DIR/target_initial_raw.txt" 2>>"$OUTPUT_DIR/nmap_errors.log"
     if [ $? -eq 124 ]; then
         echo -e "\r\e[33m   [!] Scansione iniziale: timeout dopo ${init_timeout}s\e[0m"
         echo "INITIAL SCAN TIMEOUT after ${init_timeout}s" > "$OUTPUT_DIR/target_initial_raw.txt"
@@ -1172,7 +1234,6 @@ scan_single_target() {
         fi
     fi
     if [ -z "$SUBNET" ]; then
-        # Determina subnet dal target: cerca CIDR reale o usa default /24
         local target_net
         target_net=$(echo "$target" | grep -oE '^([0-9]{1,3}\.){2}[0-9]{1,3}\.' || true)
         if [ -n "$target_net" ]; then
@@ -1183,7 +1244,6 @@ scan_single_target() {
         log_message "WARN" "Fallback subnet $SUBNET"
     fi
     if [ -z "$GATEWAY" ]; then
-        # Usa route predefinita o fallback al primo hop dal routing
         GATEWAY=$(ip route 2>/dev/null | grep "^default" | awk '{print $3}' | head -1 || true)
         if [ -z "$GATEWAY" ]; then
             GATEWAY=$(echo "$SUBNET" | sed 's/\.0\/24/.1/' || echo "10.0.0.1")
@@ -1199,7 +1259,7 @@ scan_single_target() {
     echo -e "\e[33m   → Gateway: $GATEWAY\e[0m"
 
     echo -ne "\e[36m   [⏳] Scan ARP in corso...\e[0m"
-    nmap -PR -sn "$SUBNET" -oG "$OUTPUT_DIR/hosts_vivi.gnmap" 2>/dev/null || true
+    nmap -PR -sn "$SUBNET" -oG "$OUTPUT_DIR/hosts_vivi.gnmap" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
     HOSTS_ATTIVI=$(grep "Host:" "$OUTPUT_DIR/hosts_vivi.gnmap" 2>/dev/null | cut -d' ' -f2 | sort -u || echo "")
     NUM_HOSTS=$(echo "$HOSTS_ATTIVI" | grep -c . 2>/dev/null || echo 0)
     echo -e "\r\e[32m   [✓] Trovati $NUM_HOSTS host attivi!\e[0m"
@@ -1275,6 +1335,8 @@ EOF
     rm -f "$OUTPUT_DIR"/*.gnmap  2>/dev/null || true
     find "$OUTPUT_DIR" -name "web_header_*.txt" -size 0 -delete 2>/dev/null || true
     find "$OUTPUT_DIR" -type f -size 0 -delete 2>/dev/null || true
+    # Pulisci temp file
+    rm -f /tmp/recon_nvd_av_*.tmp 2>/dev/null || true
     echo -e "\e[32m   [✓] Pulizia completata!\e[0m"
 
     # ═══════════════════════════════════════════════════════════════════
@@ -1326,7 +1388,6 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 # Parsing argomenti
-# Supporta sia ordine posizionale che flag nominativi per --single-target
 PARSED_TARGET=""
 PARSED_OUTPUT_DIR=""
 PARSED_NMAP_TIMING=""
@@ -1334,21 +1395,6 @@ PARSED_TOP_PORTS=""
 PARSED_MAX_PARALLEL=""
 PARSED_MODE=""
 PARSED_LOG_LEVEL=""
-
-parse_flag() {
-    local arg="$1"
-    local next="$2"
-    case "$arg" in
-        --output-dir) echo "$next" ;;
-        --nmap-timing) echo "$next" ;;
-        --top-ports) echo "$next" ;;
-        --max-parallel) echo "$next" ;;
-        --mode) echo "$next" ;;
-        --log-level) echo "$next" ;;
-        --single-target) echo "__SINGLE__" ;;
-        *) echo "" ;;
-    esac
-}
 
 i=1
 while [ $i -le $# ]; do
@@ -1365,11 +1411,10 @@ while [ $i -le $# ]; do
     if [ "$arg" = "--single-target" ]; then
         PARSED_TARGET="$next"
         i=$(( i + 2 ))
-        # Il target è stato trovato, processa eventuali flag successivi
         continue
     fi
 
-    # Flag con valore (stile --flag=value o --flag value)
+    # Flag con valore (stile --flag=value)
     if [[ "$arg" =~ ^--[a-z-]+=.* ]]; then
         local flag_name="${arg%%=*}"
         local flag_val="${arg#*=}"
@@ -1387,7 +1432,6 @@ while [ $i -le $# ]; do
 
     # Se il primo argomento non è un flag, è il target
     if [ $i -eq 1 ] && [[ "$arg" != --* ]]; then
-        # Non siamo in modalità batch/single-target, è invocazione diretta
         TARGET="$arg"
         i=$(( i + 1 ))
         continue
@@ -1409,7 +1453,6 @@ done
 if [ -n "$PARSED_TARGET" ]; then
     TARGET="$PARSED_TARGET"
     SKIP_DISCLAIMER=true
-    # Applica override configurazioni
     [ -n "$PARSED_OUTPUT_DIR" ]  && OUTPUT_DIR="$PARSED_OUTPUT_DIR"
     [ -n "$PARSED_NMAP_TIMING" ] && NMAP_TIMING="$PARSED_NMAP_TIMING"
     [ -n "$PARSED_TOP_PORTS" ]   && NMAP_TOP_PORTS_INITIAL="$PARSED_TOP_PORTS" && NMAP_TOP_PORTS_DETAIL="$PARSED_TOP_PORTS"
@@ -1490,9 +1533,9 @@ if [ -n "$BATCH_FILE" ]; then
             --top-ports "$NMAP_TOP_PORTS_INITIAL" \
             --max-parallel "$MAX_PARALLEL_JOBS" \
             --mode "${MODE_CHOICE:-0}" \
-            --log-level "$LOG_LEVEL" 2>&1 | tee -a "$OUTPUT_DIR/batch_progress.log"
+            --log-level "$LOG_LEVEL" 2>&1 | tee -a "$OUTPUT_DIR/batch_progress.log" || true
 
-        log_message "INFO" "Target $counter/$NUM_TARGETS: $t completato (exit=$?)"
+        log_message "INFO" "Target $counter/$NUM_TARGETS: $t completato"
     done
 
     # Riepilogo batch
@@ -1532,7 +1575,7 @@ if [ "$SKIP_DISCLAIMER" != "true" ]; then
 fi
 
 # Validazione target — ottieni l'IP risolto
-TARGET_RESOLVED=$(validate_target "$TARGET")
+TARGET_RESOLVED=$(validate_target "$TARGET" || echo "")
 if [ -n "$TARGET_RESOLVED" ]; then
     TARGET="$TARGET_RESOLVED"
 fi

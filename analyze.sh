@@ -4,19 +4,19 @@
 # DESCRIZIONE: Fase 2 di ricognizione. Prende in input il report.json
 #              generato da recognize.sh ed esegue analisi approfondite:
 #              nikto (web), enum4linux (SMB), snmpwalk (SNMP UDP),
-#              testssl.sh (HTTPS), hydra (bruteforce ssh — annotazione),
+#              testssl.sh (HTTPS), hydra (bruteforce ssh),
 #              whois/PTR lookup, e genera un report finale consolidato.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 1.1
-# DATA: 2026-06-15
+# VERSIONE: 2.0
+# DATA: 2026-06-22
 #
 # USO: ./analyze.sh <report.json>
 #
-# DIPENDENZE OPZIONALI: nikto, enum4linux, snmpwalk, testssl.sh, hydra
+# DIPENDENZE OPZIONALI: nikto, enum4linux, snmpwalk, testssl.sh, hydra, whois
 ################################################################################
 
-set -u -o pipefail
+set -euo pipefail
 
 # ============================================================================
 # CONTROLLO INPUT
@@ -38,6 +38,16 @@ REPORT_FINAL="$OUTPUT_DIR/report_finale.txt"
 TIMEOUT_TOOL=120    # timeout generico per ogni tool esterno
 TIMEOUT_NIKTO=180
 TIMEOUT_TESTSSL=90
+TIMEOUT_HYDRA=300   # 5 min per hydra
+HYDRA_USERLIST="/usr/share/wordlists/metasploit/namelist.txt"
+HYDRA_PASSLIST="/usr/share/wordlists/rockyou.txt.gz"
+
+# Temp file sicuri
+STDERR_TMP=""
+trap_cleanup() {
+    rm -f "${STDERR_TMP:-}" 2>/dev/null || true
+}
+trap trap_cleanup EXIT INT TERM
 
 # Error handler
 error_handler() {
@@ -69,7 +79,7 @@ log() {
 # ============================================================================
 clear
 echo -e "\e[34m╔═══════════════════════════════════════════════════════════════╗\e[0m"
-echo -e "\e[34m║  analyze.sh v1.1 — Fase 2 ricognizione approfondita          ║\e[0m"
+echo -e "\e[34m║  analyze.sh v2.0 — Fase 2 ricognizione approfondita          ║\e[0m"
 echo -e "\e[34m╚═══════════════════════════════════════════════════════════════╝\e[0m"
 echo -e "\e[36m   Input: $JSON_FILE\e[0m"
 echo -e "\e[36m   Output: $OUTPUT_DIR\e[0m"
@@ -89,7 +99,7 @@ echo ""
 # ============================================================================
 declare -A TOOLS_AVAILABLE=(
     [nikto]=false [enum4linux]=false [snmpwalk]=false
-    [testssl]=false [hydra]=false [whois]=false
+    [testssl]=false [hydra]=false [whois]=false [dig]=false
 )
 
 for tool in nikto enum4linux snmpwalk hydra whois; do
@@ -98,6 +108,8 @@ done
 # testssl può essere script o binario
 { command -v testssl &>/dev/null || command -v testssl.sh &>/dev/null; } && \
     TOOLS_AVAILABLE[testssl]=true
+# dig per PTR lookup
+command -v dig &>/dev/null && TOOLS_AVAILABLE[dig]=true
 
 echo -e "\e[36m  Tool disponibili:\e[0m"
 for tool in "${!TOOLS_AVAILABLE[@]}"; do
@@ -109,53 +121,9 @@ for tool in "${!TOOLS_AVAILABLE[@]}"; do
 done
 echo ""
 
-# Funzione helper: esegue tool esterno in modo sicuro (NO eval)
-run_tool_safe() {
-    local tool_name="$1"
-    shift
-    # La funzione accetta: tool_name cmd_args... out_file timeout_sec desc
-    # Ricostruiamo: cmd_args sono tutto fino a out_file
-    local args=()
-    local out_file=""
-    local timeout_sec=""
-    local desc=""
-
-    # Cerca il parametro out_file (è l'unico che non inizia con -)
-    local parsing_mode="args"
-    for arg in "$@"; do
-        case "$parsing_mode" in
-            args)
-                if [[ "$arg" =~ ^[a-zA-Z0-9_/\.\-]+$ ]] && [ ! -f "$arg" ] && [ -z "$out_file" ]; then
-                    # Potrebbe essere il file di output se è un path
-                    # Criterio: se non è un flag e non siamo in modalità timeout
-                    args+=("$arg")
-                elif [ -f "$arg" ] && [[ "$arg" == *"$tool_name"* ]]; then
-                    # File specifico del tool
-                    args+=("$arg")
-                else
-                    # Assume sia il file di output
-                    out_file="$arg"
-                    parsing_mode="timeout"
-                fi
-                ;;
-            timeout)
-                timeout_sec="$arg"
-                parsing_mode="desc"
-                ;;
-            desc)
-                desc="$arg"
-                parsing_mode="done"
-                ;;
-        esac
-    done
-
-    # Fallback: se la funzione è chiamata con parametri espliciti, usiamo metodo diretto
-    # In pratica, chiamiamo run_tool_safe nome "comando con args" out_file timeout desc
-    # Dato che l'overloading è complesso in bash, usiamo l'approccio più semplice:
-    # la funzione riceve i parametri posizionali come nel codice originale
-}
-
-# Versione semplificata: run_tool_exec <tool_name> <cmd_array> <out_file> <timeout> <desc>
+# ============================================================================
+# FUNZIONE: Esecuzione tool esterno in modo sicuro (NO eval)
+# ============================================================================
 run_tool_exec() {
     local tool_name="$1"
     local -n cmd_ref=$2  # nameref all'array
@@ -166,41 +134,46 @@ run_tool_exec() {
     echo -e "\e[36m   [$tool_name] $desc...\e[0m"
     log "INFO" "$tool_name su $desc"
 
+    # Crea temp file sicuro per stderr
+    STDERR_TMP=$(mktemp /tmp/analyze_stderr_XXXXXX.tmp)
+    trap trap_cleanup EXIT INT TERM
+
     # Esecuzione DIRETTA senza eval — usa l'array
-    timeout "$timeout_sec" "${cmd_ref[@]}" > "$out_file" 2>/tmp/analyze_stderr_$$.tmp
+    timeout "$timeout_sec" "${cmd_ref[@]}" > "$out_file" 2>"$STDERR_TMP"
     local rc=$?
 
     if [ $rc -eq 124 ]; then
         log "WARN" "$tool_name: timeout dopo ${timeout_sec}s su $desc"
         echo -e "\e[33m      [!] Timeout dopo ${timeout_sec}s\e[0m"
+        rm -f "$STDERR_TMP"
         return 1
     elif [ $rc -ne 0 ] && [ $rc -ne 1 ] && [ $rc -ne 2 ]; then
         # rc=1 = tool ha trovato vulnerabilità (normale per nikto/testssl)
         # rc=2 = errori di connessione (normale per molti tool)
         # rc>2 = errore reale (crash, segfault)
         local err_msg
-        err_msg=$(cat /tmp/analyze_stderr_$$.tmp 2>/dev/null || true)
+        err_msg=$(cat "$STDERR_TMP" 2>/dev/null || true)
         log "WARN" "$tool_name: errore (exit $rc) su $desc — $err_msg"
         echo -e "\e[33m      [!] $tool_name terminato con errore (exit=$rc)\e[0m"
         [ -n "$err_msg" ] && echo -e "\e[90m        stderr: ${err_msg:0:200}\e[0m"
-        rm -f /tmp/analyze_stderr_$$.tmp
+        rm -f "$STDERR_TMP"
         return 1
     fi
-    rm -f /tmp/analyze_stderr_$$.tmp
+    rm -f "$STDERR_TMP"
     return 0
 }
 
 # ============================================================================
-# ESTRAZIONE HOST DAL JSON (python3)
+# ESTRAZIONE HOST DAL JSON (python3 — SICURO: path via sys.argv)
 # ============================================================================
 log "INFO" "Parsing report JSON..."
 
 # Estrai dati host in formato semplice per bash
-HOST_DATA=$(python3 - <<PYEOF
+HOST_DATA=$(python3 - "$JSON_FILE" << 'PYEOF'
 import json, sys
 
 try:
-    data = json.load(open("$JSON_FILE"))
+    data = json.load(open(sys.argv[1]))
 except Exception as e:
     print(f"ERRORE: {e}", file=sys.stderr)
     sys.exit(1)
@@ -297,10 +270,14 @@ while IFS= read -r raw_line; do
     {
         echo "[WHOIS/PTR]"
         if [ "${TOOLS_AVAILABLE[whois]}" = true ]; then
-            timeout 10 whois "$ip" 2>/dev/null | grep -iE "netname|descr|country|orgname|abuse" | head -10 || true
+            timeout 20 whois "$ip" 2>/dev/null | grep -iE "netname|descr|country|orgname|abuse" | head -10 || true
         fi
         # PTR record
-        PTR=$(timeout 5 dig -x "$ip" +short 2>/dev/null | head -3 || echo "PTR: N/D")
+        if [ "${TOOLS_AVAILABLE[dig]}" = true ]; then
+            PTR=$(timeout 5 dig -x "$ip" +short 2>/dev/null | head -3 || echo "PTR: N/D")
+        else
+            PTR=$(timeout 5 nslookup "$ip" 2>/dev/null | grep "name =" | head -1 | awk '{print $NF}' || echo "PTR: N/D")
+        fi
         echo "  PTR: $PTR"
     } >> "$REPORT_FINAL" 2>/dev/null
     echo -e "\e[32m      [✓] WHOIS completato\e[0m"
@@ -417,10 +394,65 @@ while IFS= read -r raw_line; do
         fi
     fi
 
-    # ── HYDRA annotazione SSH ─────────────────────────────────────────────
-    if [ "$ssh_open" = "1" ]; then
+    # ── HYDRA — Bruteforce SSH (solo se wordlist disponibile) ─────────────
+    if [ "$ssh_open" = "1" ] && [ "${TOOLS_AVAILABLE[hydra]}" = true ]; then
+        echo -e "\e[36m   [HYDRA] Test bruteforce SSH su $ip...\e[0m"
+        
+        # Determina wordlist disponibile
+        local userlist=""
+        local passlist=""
+        
+        if [ -f "$HYDRA_USERLIST" ]; then
+            userlist="$HYDRA_USERLIST"
+        elif [ -f "/usr/share/wordlists/metasploit/namelist.txt" ]; then
+            userlist="/usr/share/wordlists/metasploit/namelist.txt"
+        elif [ -f "/usr/share/wordlists/rockyou.txt" ]; then
+            userlist="/usr/share/wordlists/rockyou.txt"
+        fi
+        
+        if [ -f "$HYDRA_PASSLIST" ]; then
+            passlist="$HYDRA_PASSLIST"
+        elif [ -f "/usr/share/wordlists/rockyou.txt" ]; then
+            passlist="/usr/share/wordlists/rockyou.txt"
+        fi
+        
+        if [ -n "$userlist" ] && [ -n "$passlist" ]; then
+            local_out="$HOST_OUT/hydra_ssh.txt"
+            # Usa solo i primi 50 utenti e 100 password per velocità
+            local hydra_cmd=(hydra -L "$userlist" -P "$passlist" -t 4 -o "$local_out" \
+                            -f -V ssh://"$ip" 2>/dev/null)
+            run_tool_exec "HYDRA" hydra_cmd "$local_out" "$TIMEOUT_HYDRA" "hydra SSH $ip" || true
+            
+            if [ -f "$local_out" ] && [ -s "$local_out" ]; then
+                local found
+                found=$(grep -c "login:" "$local_out" 2>/dev/null || echo 0)
+                if [ "$found" -gt 0 ]; then
+                    echo -e "\e[31m      [!] HYDRA: $found credenziali SSH trovate!\e[0m"
+                    {
+                        echo "[HYDRA - SSH Bruteforce]"
+                        echo "  ⚠️  CREDENZIALI TROVATE:"
+                        grep "login:" "$local_out" || true
+                    } >> "$REPORT_FINAL"
+                else
+                    echo -e "\e[32m      [✓] Nessuna credenziale SSH trovata\e[0m"
+                    echo "[HYDRA - SSH Bruteforce] Nessuna credenziale trovata" >> "$REPORT_FINAL"
+                fi
+            fi
+        else
+            echo -e "\e[33m   [HYDRA] Wordlist non trovata — skip bruteforce\e[0m"
+            echo "[HYDRA - SSH Bruteforce] Skip: wordlist non disponibile" >> "$REPORT_FINAL"
+        fi
+        
+        # Segnala comunque SSH aperta
+        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt" || true
+        {
+            echo "[SSH] Porta 22 aperta su $ip"
+            echo "  → Candidato per bruteforce manuale con hydra"
+            echo "  → Verificare accesso anonimo: ssh -o BatchMode=yes root@$ip 2>&1"
+        } >> "$REPORT_FINAL"
+    elif [ "$ssh_open" = "1" ]; then
         echo -e "\e[33m   [SSH] Porta 22 aperta — annotato in ssh_targets.txt\e[0m"
-        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt"
+        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt" || true
         {
             echo "[SSH] Porta 22 aperta su $ip"
             echo "  → Candidato per bruteforce con: hydra -L users.txt -P pass.txt $ip ssh"
@@ -438,9 +470,9 @@ while IFS= read -r raw_line; do
             cve_id="${cve_entry%%:*}"
             cve_score="${cve_entry##*:}"
             
-            if awk -v s="$cve_score" 'BEGIN{exit !(s>=7.0)}'; then
+            if python3 -c "exit(0 if float('${cve_score:-0}') >= 7.0 else 1)" 2>/dev/null; then
                 color="\e[31m"; label="CRITICA"
-            elif awk -v s="$cve_score" 'BEGIN{exit !(s>=4.0)}'; then
+            elif python3 -c "exit(0 if float('${cve_score:-0}') >= 4.0 else 1)" 2>/dev/null; then
                 color="\e[33m"; label="MEDIA  "
             else
                 color="\e[32m"; label="BASSA  "

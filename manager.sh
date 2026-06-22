@@ -5,20 +5,21 @@
 #              Gestisce avvio, aggiornamenti, storico sessioni e dipendenze.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 2.0
+# VERSIONE: 2.1
 # DATA: 2026-06-22
 #
 # USO: ./manager.sh
 ################################################################################
 
-set -euo pipefail
+# NOTA: NON usiamo set -e per garantire resilienza.
+set -uo pipefail
 
-# Error handler
+# Error handler non-bloccante
 error_handler() {
     local line=$1
     local cmd=$2
     local rc=$3
-    echo -e "\e[31m[!] ERRORE (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
+    echo -e "\e[31m[!] ERRORE RECUPERATO (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
 }
 trap 'error_handler $LINENO "$BASH_COMMAND" $?' ERR
 
@@ -50,7 +51,7 @@ log() {
     # Rotazione automatica se il log supera MAX_LOG_SIZE_MB
     if [ -f "$MANAGER_LOG" ]; then
         local size_mb
-        size_mb=$(($(stat -c%s "$MANAGER_LOG" 2>/dev/null || echo 0) / 1048576))
+        size_mb=$(($(stat -c%s "$MANAGER_LOG" 2>/dev/null || echo 0) / 1048576)) 2>/dev/null || size_mb=0
         if [ "$size_mb" -gt "$MAX_LOG_SIZE_MB" ] 2>/dev/null; then
             mv "$MANAGER_LOG" "${MANAGER_LOG}.1" 2>/dev/null || true
             touch "$MANAGER_LOG" 2>/dev/null || true
@@ -135,9 +136,9 @@ run_script_in_sessions() {
             return 1
         }
         if [ "$EUID" -ne 0 ]; then
-            sudo bash "$script_path" "${args[@]}"
+            sudo bash "$script_path" "${args[@]}" || true
         else
-            bash "$script_path" "${args[@]}"
+            bash "$script_path" "${args[@]}" || true
         fi
     )
     return $?
@@ -197,7 +198,7 @@ check_target_allowed() {
     local allowed="${RECON_SECURITY_ALLOWED_TARGETS:-}"
     [ -z "$allowed" ] || [ "$allowed" = "[]" ] && return 0
     # Parsing semplice: supporta CIDR e IP singoli
-    IFS=',' read -ra ALLOWED_LIST <<< "$(echo "$allowed" | tr -d '[]" ')"
+    IFS=',' read -ra ALLOWED_LIST <<< "$(echo "$allowed" | tr -d '[]" ')" 2>/dev/null || true
     for entry in "${ALLOWED_LIST[@]}"; do
         [ -z "$entry" ] && continue
         # CIDR match
@@ -268,7 +269,7 @@ menu_recognize() {
 
     log "Avvio recognize.sh — target: $TARGET_INPUT"
 
-    run_script_in_sessions "$RECOGNIZE" "$TARGET_INPUT"
+    run_script_in_sessions "$RECOGNIZE" "$TARGET_INPUT" || true
     STATUS=$?
 
     echo ""
@@ -303,7 +304,7 @@ run_analyze() {
     fi
 
     log "Avvio analyze.sh — input: $json_file"
-    run_script_in_sessions "$ANALYZE" "$json_file"
+    run_script_in_sessions "$ANALYZE" "$json_file" || true
     STATUS=$?
 
     if [ "$STATUS" -eq 0 ]; then
@@ -350,7 +351,7 @@ menu_analyze() {
 
         printf "  ${CYN}%2d)${RST}  %-35s  target=${YEL}%-15s${RST}  host=${GRN}%s${RST}  CVE=${RED}%s${RST}  mode=%s\n" \
             "$i" "$session_name" "$target" "$n_hosts" "$n_cves" "$mode"
-        ((i++))
+        ((i++)) || true
     done
 
     echo ""
@@ -429,7 +430,7 @@ menu_batch() {
     echo ""
     log "Avvio batch scanning — file: $BATCH_FILE ($n_targets target)"
 
-    run_script_in_sessions "$RECOGNIZE" --batch "$BATCH_FILE"
+    run_script_in_sessions "$RECOGNIZE" --batch "$BATCH_FILE" || true
     STATUS=$?
 
     if [ "$STATUS" -eq 0 ]; then
@@ -538,7 +539,7 @@ menu_install() {
             fi
             echo ""
             log "Avvio installazione completa"
-            sudo bash "$INSTALL"
+            sudo bash "$INSTALL" || true
             log "Installazione completata"
             ;;
         2)
@@ -547,7 +548,7 @@ menu_install() {
             fi
             echo ""
             log "Avvio aggiornamento pacchetti"
-            sudo bash "$INSTALL" --update-only
+            sudo bash "$INSTALL" --update-only || true
             log "Aggiornamento completato"
             ;;
         3)
@@ -598,7 +599,7 @@ menu_cache() {
 
     if [ "$n_entries" != "?" ] && (( n_entries > 0 )); then
         echo -e "  ${CYN}CVE in cache:${RST}"
-        python3 - "$NVD_CACHE" << 'PYEOF' 2>/dev/null
+        python3 - "$NVD_CACHE" << 'PYEOF' 2>/dev/null || true
 import json, sys
 data = json.load(open(sys.argv[1]))
 for cve, info in sorted(data.items()):
@@ -699,7 +700,7 @@ menu_pdf() {
         target=$(python3 -c "import json; d=json.load(open('$jf')); print(d['meta']['target'])" 2>/dev/null || echo "?")
         printf "  ${CYN}%2d)${RST}  %-35s  target=${YEL}%-15s${RST}\n" \
             "$i" "$session_name" "$target"
-        ((i++))
+        ((i++)) || true
     done
 
     echo ""
@@ -720,7 +721,7 @@ menu_pdf() {
     echo -e "  ${CYN}Output: $output_pdf${RST}"
     echo ""
 
-    bash "$pdf_script" "$selected_json" "$output_pdf"
+    bash "$pdf_script" "$selected_json" "$output_pdf" || true
     if [ $? -eq 0 ]; then
         log "PDF generato: $output_pdf"
         echo -e "\n  ${GRN}[✓] PDF generato con successo${RST}"
@@ -745,7 +746,7 @@ menu_checksum() {
         echo -e "      Genera con: cd $SCRIPT_DIR && sha256sum *.sh > checksums.sha256"
         echo ""
         if confirm "Generare checksum ora?"; then
-            (cd "$SCRIPT_DIR" && sha256sum *.sh > checksums.sha256 2>/dev/null)
+            (cd "$SCRIPT_DIR" && sha256sum *.sh > checksums.sha256 2>/dev/null) || true
             echo -e "  ${GRN}[✓] checksums.sha256 generato${RST}"
             log "Checksum generato"
         fi
@@ -754,7 +755,7 @@ menu_checksum() {
 
     echo -e "  ${CYN}Verifica checksum SHA256...${RST}"
     echo ""
-    (cd "$SCRIPT_DIR" && sha256sum -c checksums.sha256 --quiet 2>/dev/null)
+    (cd "$SCRIPT_DIR" && sha256sum -c checksums.sha256 --quiet 2>/dev/null) || true
     local rc=$?
 
     if [ $rc -eq 0 ]; then

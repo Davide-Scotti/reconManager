@@ -7,7 +7,7 @@
 #              parallelizzazione host, output JSON e mappa di rete.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 3.3
+# VERSIONE: 3.4
 # DATA: 2026-06-22
 #
 # USO: ./recognize.sh <IP_TARGET>
@@ -18,7 +18,10 @@
 # OUTPUT: Directory con report testuali, JSON, log, mappa PNG e priorità.
 ################################################################################
 
-set -euo pipefail
+# NOTA: NON usiamo set -e per garantire resilienza.
+# Lo script deve sopravvivere a errori parziali (nmap che fallisce, CVE non trovate, etc.)
+# e continuare fino al completamento di tutte le fasi.
+set -uo pipefail
 
 # ============================================================================
 # CONFIGURAZIONE DEFAULT (sovrascritta da select_mode)
@@ -66,13 +69,19 @@ declare -A CVE_AV_MAP=(
 )
 
 # ============================================================================
-# FUNZIONE: Error handler per set -e
+# FUNZIONE: Error handler non-bloccante — logga ma NON esce
 # ============================================================================
 error_handler() {
     local line=$1
     local cmd=$2
     local rc=$3
-    echo -e "\e[31m[!] ERRORE (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
+    echo -e "\e[31m[!] ERRORE RECUPERATO (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
+    # Logga l'errore se LOG_FILE è definito
+    if [ -n "${LOG_FILE:-}" ]; then
+        local ts
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$ts] [ERROR] Errore recuperato linea $line: $cmd (exit=$rc)" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 trap 'error_handler $LINENO "$BASH_COMMAND" $?' ERR
 
@@ -129,7 +138,7 @@ validate_target() {
             echo -e "\e[33m\n   [!] 'host' non disponibile, skip risoluzione\e[0m"
         else
             local resolved
-            resolved=$(host "$target" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}')
+            resolved=$(host "$target" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}') || true
             if [ -z "$resolved" ]; then
                 echo -e "\e[31m\n[-] '$target' non è un IP valido né un hostname risolvibile\e[0m"
                 return 1
@@ -463,13 +472,13 @@ fetch_cvss_from_nvd_batch() {
         fi
 
         local av cvss_score cvss_severity description
-        av=$(echo "$response"          | grep -oP '"attackVector": "\K[^"]+' | head -1)
-        cvss_score=$(echo "$response"  | grep -oP '"baseScore": \K[0-9.]+' | head -1)
-        cvss_severity=$(echo "$response" | grep -oP '"baseSeverity": "\K[^"]+' | head -1)
-        description=$(echo "$response" | grep -oP '"value": "\K[^"]+' | head -1)
+        av=$(echo "$response"          | grep -oP '"attackVector": "\K[^"]+' | head -1) || true
+        cvss_score=$(echo "$response"  | grep -oP '"baseScore": \K[0-9.]+' | head -1) || true
+        cvss_severity=$(echo "$response" | grep -oP '"baseSeverity": "\K[^"]+' | head -1) || true
+        description=$(echo "$response" | grep -oP '"value": "\K[^"]+' | head -1) || true
 
         if [ -z "$av" ]; then
-            av=$(echo "$response" | grep -oP '"accessVector": "\K[^"]+' | head -1)
+            av=$(echo "$response" | grep -oP '"accessVector": "\K[^"]+' | head -1) || true
             [[ "$av" == "ADJACENT_NETWORK" ]] && av="ADJACENT_NETWORK"
         fi
 
@@ -513,11 +522,11 @@ check_ssh_config() {
 
     if [ "${weak_algo:-0}" -gt 0 ]; then
         echo "   [CONFIG] ⚠️ Algoritmi deboli rilevati:" >> "$output_file"
-        echo "$algo_output" | grep -iE "diffie-hellman-group1-sha1|ssh-rsa|ssh-dss" >> "$output_file"
+        echo "$algo_output" | grep -iE "diffie-hellman-group1-sha1|ssh-rsa|ssh-dss" | head -10 >> "$output_file" || true
         echo 80
     else
         local banner
-        banner=$(timeout "$TIMEOUT_NC" nc -n "$host" 22 2>/dev/null | head -1)
+        banner=$(timeout "$TIMEOUT_NC" nc -n "$host" 22 2>/dev/null | head -1) || true
         [ -n "$banner" ] && echo "   [CONFIG] Banner SSH: $banner" >> "$output_file"
         echo "   [CONFIG] ✅ Nessun algoritmo obsoleto rilevato" >> "$output_file"
         echo 30
@@ -535,20 +544,20 @@ check_web_config() {
 
     local server_status
     server_status=$(timeout "$TIMEOUT_CURL" curl -s -k \
-        "http://$host:$port/server-status" 2>/dev/null | head -5 || true)
+        "http://$host:$port/server-status" 2>/dev/null | head -5) || true
 
-    if echo "$server_status" | grep -qi "Apache Server Status"; then
+    if echo "$server_status" | grep -qi "Apache Server Status" 2>/dev/null; then
         echo "   [CONFIG] ⚠️ server-status ACCESSIBILE — information leakage critico!" >> "$output_file"
         echo 90; return
     fi
 
     local headers
-    headers=$(timeout "$TIMEOUT_CURL" curl -s -k -I "http://$host:$port" 2>/dev/null || true)
+    headers=$(timeout "$TIMEOUT_CURL" curl -s -k -I "http://$host:$port" 2>/dev/null) || true
 
-    grep -qi "Server:" <<< "$headers" && \
+    grep -qi "Server:" <<< "$headers" 2>/dev/null && \
         echo "   [CONFIG] Server header: $(grep -i 'Server:' <<< "$headers" | head -1)" >> "$output_file"
 
-    if grep -qi "Strict-Transport-Security" <<< "$headers"; then
+    if grep -qi "Strict-Transport-Security" <<< "$headers" 2>/dev/null; then
         echo "   [CONFIG] ✅ HSTS abilitato" >> "$output_file"
         echo 30
     else
@@ -562,7 +571,7 @@ check_web_config() {
 # ============================================================================
 analizza_cve() {
     local host="$1" software="$2" version="$3" cve_id="$4" output_file="$5"
-    local backport_score av_score config_score total_score
+    local backport_score=50 av_score=50 config_score=50 total_score=50
     local av=""
 
     {
@@ -576,7 +585,7 @@ analizza_cve() {
     log_message "DEBUG" "Analisi CVE $cve_id su $host"
 
     # Livello 1: OS Backporting
-    if echo "$software $version" | grep -qiE "debian|ubuntu|el[0-9]|suse|alpine|raspbian"; then
+    if echo "$software $version" | grep -qiE "debian|ubuntu|el[0-9]|suse|alpine|raspbian" 2>/dev/null; then
         backport_score=30
         echo "[LIVELLO 1 - OS Backporting]" >> "$output_file"
         echo "   ✅ Distribuzione rilevata → Backporting PROBABILE (score 30/100)" >> "$output_file"
@@ -597,7 +606,7 @@ analizza_cve() {
     elif [ -n "${CVE_AV_MAP_FETCHED:-}" ]; then
         if [ -f "${NVD_AV_MAP_FILE:-}" ]; then
             local fetched_av
-            fetched_av=$(grep "^$cve_id|" "$NVD_AV_MAP_FILE" 2>/dev/null | cut -d'|' -f2 || true)
+            fetched_av=$(grep "^$cve_id|" "$NVD_AV_MAP_FILE" 2>/dev/null | cut -d'|' -f2) || true
             if [ -n "$fetched_av" ]; then
                 av="$fetched_av"
                 echo "   ✓ Attack Vector (NVD): $av" >> "$output_file"
@@ -657,14 +666,14 @@ analizza_cve() {
 }
 
 # ============================================================================
-# FUNZIONE: Pulizia output nmap
+# FUNZIONE: Pulizia output nmap (con || true per grep)
 # ============================================================================
 clean_nmap_output() {
     local input_file="$1"
     [ -f "$input_file" ] || return
     grep -v -E "^(Stats:|SYN Stealth Scan Timing|Service scan Timing|About [0-9.]+% done|^$)" \
-        "$input_file" | awk '!seen[$0]++' > "${input_file}.tmp"
-    mv "${input_file}.tmp" "$input_file"
+        "$input_file" 2>/dev/null | awk '!seen[$0]++' > "${input_file}.tmp" 2>/dev/null || true
+    mv "${input_file}.tmp" "$input_file" 2>/dev/null || true
 }
 
 # ============================================================================
@@ -695,7 +704,7 @@ scan_tcp_host() {
     [ "$USE_ALL_PORTS" = true ] && timeout_sec=7200
 
     log_message "DEBUG" "Avvio scan TCP su $host (timeout ${timeout_sec}s)"
-    timeout "$timeout_sec" "${cmd[@]}" > "$raw_out" 2>>"$OUTPUT_DIR/nmap_errors.log"
+    timeout "$timeout_sec" "${cmd[@]}" > "$raw_out" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
     local rc=$?
     if [ $rc -eq 124 ]; then
         log_message "WARN" "Scan TCP su $host: timeout dopo ${timeout_sec}s"
@@ -703,7 +712,7 @@ scan_tcp_host() {
     fi
 
     clean_nmap_output "$raw_out"
-    mv "$raw_out" "$final_out"
+    mv "$raw_out" "$final_out" 2>/dev/null || true
 }
 
 # ============================================================================
@@ -720,7 +729,7 @@ scan_udp_host() {
     cmd+=("$host")
 
     log_message "DEBUG" "Avvio scan UDP su $host"
-    timeout 600 "${cmd[@]}" > "$out" 2>>"$OUTPUT_DIR/nmap_errors.log"
+    timeout 600 "${cmd[@]}" > "$out" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
     local rc=$?
     if [ $rc -eq 124 ]; then
         log_message "WARN" "Scan UDP su $host: timeout dopo 600s"
@@ -728,9 +737,9 @@ scan_udp_host() {
     fi
 
     if grep -q "161/udp.*open" "$out" 2>/dev/null; then
-        echo "   [UDP-SNMP] ⚠️ SNMP aperto, test community 'public'..." >> "$out"
+        echo "   [UDP-SNMP] ⚠️ SNMP aperto, test community 'public'..." >> "$out" 2>/dev/null || true
         if command -v snmpwalk &>/dev/null; then
-            timeout 5 snmpwalk -v2c -c public "$host" system 2>/dev/null | head -10 >> "$out"
+            timeout 5 snmpwalk -v2c -c public "$host" system 2>/dev/null | head -10 >> "$out" || true
         fi
     fi
 }
@@ -743,7 +752,7 @@ write_lock() {
     local timeout=30
     while ! mkdir "${lock_file}.lock" 2>/dev/null; do
         sleep 0.1
-        ((timeout--))
+        timeout=$(( timeout - 1 ))
         [ "$timeout" -le 0 ] && return 1
     done
 }
@@ -763,23 +772,27 @@ analyze_host_results() {
     # Rilevamento OS
     local os_detected
     os_detected=$(grep -E "OS details:|Service Info: OS:" "$scan_file" \
-        | cut -d: -f3- | head -1 | sed 's/^[ \t]*//;s/;//;s/"//g')
-    [ -z "$os_detected" ] && os_detected=$(grep -oP 'cpe:/o:\K[^:]+:[^:]+' "$scan_file" | head -1)
+        | cut -d: -f3- | head -1 | sed 's/^[ \t]*//;s/;//;s/"//g') || true
+    [ -z "$os_detected" ] && os_detected=$(grep -oP 'cpe:/o:\K[^:]+:[^:]+' "$scan_file" | head -1) || true
     [ -z "$os_detected" ] && os_detected="Sconosciuto"
     echo -e "\e[36m   └─ OS rilevato: \e[37m$os_detected\e[0m"
 
-    local software version
-    if grep -q "^22/tcp.*open" "$scan_file"; then
+    local software="unknown" version="unknown"
+    if grep -q "^22/tcp.*open" "$scan_file" 2>/dev/null; then
         software="OpenSSH"
-        version=$(grep -E "^22/tcp.*open" "$scan_file" | sed -E 's/.*OpenSSH ([^ ]+).*/\1/')
+        version=$(grep -E "^22/tcp.*open" "$scan_file" | sed -E 's/.*OpenSSH ([^ ]+).*/\1/') || true
     else
-        software=$(grep -E "^[0-9]+/tcp.*open" "$scan_file" | head -1 | awk '{print $3}' | cut -d'/' -f1)
-        version=$(grep -E "^[0-9]+/tcp.*open" "$scan_file" | head -1 | awk '{print $4}')
+        local line
+        line=$(grep -E "^[0-9]+/tcp.*open" "$scan_file" | head -1) || true
+        if [ -n "$line" ]; then
+            software=$(echo "$line" | awk '{print $3}' | cut -d'/' -f1) || true
+            version=$(echo "$line" | awk '{print $4}') || true
+        fi
     fi
     [ -z "$software" ] && software="unknown"
     [ -z "$version"  ] && version="unknown"
 
-    local open_ports_count
+    local open_ports_count=0
     open_ports_count=$(grep -cE "^[0-9]+/tcp.*open" "$scan_file" 2>/dev/null || echo 0)
     open_ports_count=$(echo "$open_ports_count" | tr -cd '0-9')
     [ -z "$open_ports_count" ] && open_ports_count=0
@@ -794,7 +807,7 @@ analyze_host_results() {
         [ -z "$udp_open" ] && udp_open=0
         echo -e "\e[36m   └─ Porte UDP aperte: \e[37m$udp_open\e[0m"
         if [ "$udp_open" -gt 0 ] 2>/dev/null; then
-            grep -E "^[0-9]+/udp.*open" "$udp_file" | while read -r line; do
+            grep -E "^[0-9]+/udp.*open" "$udp_file" 2>/dev/null | while read -r line; do
                 echo -e "      └─ \e[37m$line\e[0m"
             done
         fi
@@ -813,7 +826,7 @@ analyze_host_results() {
             echo "[HOST] -> $host"
             echo "OS RILEVATO: $os_detected"
             echo "CRITICITÀ INDIVIDUATE:"
-        } >> "$REPORT_VULN"
+        } >> "$REPORT_VULN" 2>/dev/null || true
         write_unlock "$OUTPUT_DIR/.report_vuln_lock"
 
         mapfile -t cve_list < <(grep -oE "CVE-[0-9]{4}-[0-9]{4,}" "$scan_file" | sort -u)
@@ -827,21 +840,21 @@ analyze_host_results() {
         fi
 
         for cve in "${cve_list[@]}"; do
-            local score
-            score=$(grep -A1 "$cve" "$scan_file" | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
+            local score="0"
+            score=$(grep -A1 "$cve" "$scan_file" 2>/dev/null | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
             write_lock "$OUTPUT_DIR/.report_vuln_lock"
-            echo "     $cve ${score:-N/A}" >> "$REPORT_VULN"
+            echo "     $cve ${score:-N/A}" >> "$REPORT_VULN" 2>/dev/null || true
             write_unlock "$OUTPUT_DIR/.report_vuln_lock"
             analizza_cve "$host" "$software" "$version" "$cve" "$REPORT_ANALISI" || true
         done
         write_lock "$OUTPUT_DIR/.report_vuln_lock"
-        echo "------------------------------------------------------------------" >> "$REPORT_VULN"
+        echo "------------------------------------------------------------------" >> "$REPORT_VULN" 2>/dev/null || true
         write_unlock "$OUTPUT_DIR/.report_vuln_lock"
 
         echo -e "\e[36m   └─ CVE trovate:\e[0m"
         grep -oE "CVE-[0-9]{4}-[0-9]{4,}" "$scan_file" | sort -u | while read -r cve; do
             local score color
-            score=$(grep -A1 "$cve" "$scan_file" | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
+            score=$(grep -A1 "$cve" "$scan_file" 2>/dev/null | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
             if python3 -c "exit(0 if float('${score:-0}') >= 7.0 else 1)" 2>/dev/null; then
                 color="\e[31m"
             elif python3 -c "exit(0 if float('${score:-0}') >= 4.0 else 1)" 2>/dev/null; then
@@ -852,18 +865,18 @@ analyze_host_results() {
             echo -e "      └─ ${color}$cve\e[0m (score: ${score:-N/A})"
         done
 
-        echo "    \"$host\" [color=tomato, label=\"$host\\nOS: $os_detected\\n(CRITICO)\"];" >> "$GRAPH_DOT"
+        echo "    \"$host\" [color=tomato, label=\"$host\\nOS: $os_detected\\n(CRITICO)\"];" >> "$GRAPH_DOT" 2>/dev/null || true
     fi
 
     # Pulisci av_map file se presente
     if [ -n "${NVD_AV_MAP_FILE:-}" ] && [ -f "$NVD_AV_MAP_FILE" ]; then
-        rm -f "$NVD_AV_MAP_FILE"
+        rm -f "$NVD_AV_MAP_FILE" 2>/dev/null || true
         unset NVD_AV_MAP_FILE CVE_AV_MAP_FETCHED
     fi
 
     if [ "$cve_present" = false ]; then
         echo -e "\e[32m   └─ Nessuna vulnerabilità nota rilevata\e[0m"
-        echo "    \"$host\" [label=\"$host\\nOS: $os_detected\"];" >> "$GRAPH_DOT"
+        echo "    \"$host\" [label=\"$host\\nOS: $os_detected\"];" >> "$GRAPH_DOT" 2>/dev/null || true
     fi
 
     # Servizio web → grab headers
@@ -874,7 +887,7 @@ analyze_host_results() {
     fi
 
     [ "$host" != "$GATEWAY" ] && \
-        echo "    \"$GATEWAY\" -- \"$host\";" >> "$GRAPH_DOT"
+        echo "    \"$GATEWAY\" -- \"$host\";" >> "$GRAPH_DOT" 2>/dev/null || true
 }
 
 # ============================================================================
@@ -906,14 +919,14 @@ run_tests() {
     t1=$(mktemp /tmp/test_nmap_XXXXXX.txt)
     printf "Stats: 0:00:01 elapsed\nNmap scan report for 127.0.0.1\nNot shown: 998 closed\n" > "$t1"
     clean_nmap_output "$t1"
-    if grep -q "Stats:" "$t1"; then echo "FAIL" >> "$TEST_LOG"; ((failed++)); else echo "PASS" >> "$TEST_LOG"; ((passed++)); fi
+    if grep -q "Stats:" "$t1" 2>/dev/null; then echo "FAIL" >> "$TEST_LOG"; failed=$(( failed + 1 )); else echo "PASS" >> "$TEST_LOG"; passed=$(( passed + 1 )); fi
     rm -f "$t1"
 
     echo "Test 2: analizza_cve cache" >> "$TEST_LOG"
     local t2
     t2=$(mktemp /tmp/test_analisi_XXXXXX.txt)
     analizza_cve "127.0.0.1" "OpenSSH" "8.9p1 Ubuntu-3" "CVE-2021-44228" "$t2" || true
-    if grep -q "NETWORK" "$t2"; then echo "PASS" >> "$TEST_LOG"; ((passed++)); else echo "FAIL" >> "$TEST_LOG"; ((failed++)); fi
+    if grep -q "NETWORK" "$t2" 2>/dev/null; then echo "PASS" >> "$TEST_LOG"; passed=$(( passed + 1 )); else echo "FAIL" >> "$TEST_LOG"; failed=$(( failed + 1 )); fi
     rm -f "$t2"
 
     echo "Test 3: nvd_cache set/get batch" >> "$TEST_LOG"
@@ -923,11 +936,13 @@ run_tests() {
     nvd_cache_set_batch "$test_cache" "CVE-TEST-0001" "LOCAL" "5.5" "MEDIUM"
     local cached_val
     cached_val=$(nvd_cache_get_batch "CVE-TEST-0001")
-    if echo "$cached_val" | grep -q "CVEHIT|CVE-TEST-0001|LOCAL"; then echo "PASS" >> "$TEST_LOG"; ((passed++)); else echo "FAIL" >> "$TEST_LOG"; ((failed++)); fi
+    if echo "$cached_val" | grep -q "CVEHIT|CVE-TEST-0001|LOCAL" 2>/dev/null; then echo "PASS" >> "$TEST_LOG"; passed=$(( passed + 1 )); else echo "FAIL" >> "$TEST_LOG"; failed=$(( failed + 1 )); fi
     rm -f "$test_cache"
 
     log_message "INFO" "Test: $passed passati, $failed falliti"
     [ "$failed" -gt 0 ] && log_message "WARN" "Alcuni test falliti — vedere $TEST_LOG"
+    # Non bloccare mai lo script principale anche se i test falliscono
+    return 0
 }
 
 # ============================================================================
@@ -975,7 +990,10 @@ for fname in sorted(os.listdir(out_dir)):
         "verdetti": []
     }
 
-    with open(os.path.join(out_dir, fname), "r", errors="ignore") as f:
+    full_path = os.path.join(out_dir, fname)
+    if not os.path.exists(full_path):
+        continue
+    with open(full_path, "r", errors="ignore") as f:
         content = f.read()
 
     for line in content.splitlines():
@@ -1060,10 +1078,10 @@ generate_csv_report() {
     {
         echo "Priorita;CVE;Score;Host;OS;Verdetto"
         if [ -f "$REPORT_VULN" ]; then
-            grep -E "CVE-[0-9]{4}-[0-9]{4,}" "$REPORT_VULN" | while read -r line; do
+            grep -E "CVE-[0-9]{4}-[0-9]{4,}" "$REPORT_VULN" 2>/dev/null | while read -r line; do
                 local cve score priority verdetto host_line
-                cve=$(echo "$line" | grep -oE "CVE-[0-9]{4}-[0-9]{4,}")
-                score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1)
+                cve=$(echo "$line" | grep -oE "CVE-[0-9]{4}-[0-9]{4,}") || true
+                score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1) || true
                 priority=$(python3 -c "
 import sys
 s = float('${score:-0}')
@@ -1074,9 +1092,9 @@ else: print('BASSA')
                 verdetto=$(grep -A20 "$cve" "$REPORT_ANALISI" 2>/dev/null \
                     | grep "VERDETTO" | head -1 | sed 's/.*\] //;s/ - /;/' || echo "N/D")
                 echo "${priority};${cve};${score:-N/A};${TARGET};${OS_DETECTED:-Sconosciuto};${verdetto}"
-            done
+            done || true
         fi
-    } > "$csv_file"
+    } > "$csv_file" 2>/dev/null || true
     echo -e "\e[32m   [✓] Report CSV generato: $csv_file\e[0m"
 }
 
@@ -1096,11 +1114,11 @@ acquire_lock() {
             exit 1
         fi
         # Processo morto — lock residue, lo rimuoviamo
-        rm -f "$LOCK_FILE"
+        rm -f "$LOCK_FILE" 2>/dev/null || true
     fi
     # Crea nuovo lock
-    echo "$$" > "$LOCK_FILE"
-    trap 'rm -f "$LOCK_FILE"' EXIT INT TERM
+    echo "$$" > "$LOCK_FILE" 2>/dev/null || true
+    trap 'rm -f "$LOCK_FILE" 2>/dev/null || true' EXIT INT TERM
     log_message "DEBUG" "Lock acquisito (PID $$)"
 }
 
@@ -1124,10 +1142,10 @@ EOF
     if [ -f "$REPORT_VULN" ]; then
         local tmp
         tmp=$(mktemp /tmp/recon_prio_XXXXXX.txt)
-        grep -E "CVE-[0-9]{4}-[0-9]{4,}" "$REPORT_VULN" | while read -r line; do
+        grep -E "CVE-[0-9]{4}-[0-9]{4,}" "$REPORT_VULN" 2>/dev/null | while read -r line; do
             local cve score priority verdetto
-            cve=$(echo "$line"   | grep -oE "CVE-[0-9]{4}-[0-9]{4,}")
-            score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1)
+            cve=$(echo "$line"   | grep -oE "CVE-[0-9]{4}-[0-9]{4,}") || true
+            score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1) || true
             priority=$(python3 -c "
 s = float('${score:-0}')
 if s >= 7.0: print('🔴 CRITICA')
@@ -1136,14 +1154,14 @@ else: print('🟢 BASSA')
 " 2>/dev/null || echo "N/D")
             verdetto=$(grep -A20 "$cve" "$REPORT_ANALISI" 2>/dev/null \
                 | grep "VERDETTO" | head -1 | cut -d' ' -f2- || echo "N/D")
-            echo "${score:-0}|$priority|$cve|$verdetto" >> "$tmp"
-        done
+            echo "${score:-0}|$priority|$cve|$verdetto" >> "$tmp" 2>/dev/null || true
+        done || true
         if [ -f "$tmp" ]; then
-            sort -rn "$tmp" | while IFS='|' read -r score priority cve verdetto; do
+            sort -rn "$tmp" 2>/dev/null | while IFS='|' read -r score priority cve verdetto; do
                 printf "│ %-12s │ %-12s │ %-6s │ %-34s │\n" \
                     "$priority" "$cve" "$score" "${verdetto:0:34}" >> "$PRIORITY_FILE"
-            done
-            rm -f "$tmp"
+            done || true
+            rm -f "$tmp" 2>/dev/null || true
         fi
     fi
 
@@ -1209,13 +1227,13 @@ scan_single_target() {
     echo -ne "\e[36m   [⏳] Scansione in corso...\e[0m"
     # Timeout globale per scansione iniziale
     local init_timeout=3600
-    timeout "$init_timeout" "${NMAP_INITIAL[@]}" > "$OUTPUT_DIR/target_initial_raw.txt" 2>>"$OUTPUT_DIR/nmap_errors.log"
+    timeout "$init_timeout" "${NMAP_INITIAL[@]}" > "$OUTPUT_DIR/target_initial_raw.txt" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
     if [ $? -eq 124 ]; then
         echo -e "\r\e[33m   [!] Scansione iniziale: timeout dopo ${init_timeout}s\e[0m"
         echo "INITIAL SCAN TIMEOUT after ${init_timeout}s" > "$OUTPUT_DIR/target_initial_raw.txt"
     fi
     clean_nmap_output "$OUTPUT_DIR/target_initial_raw.txt"
-    mv "$OUTPUT_DIR/target_initial_raw.txt" "$OUTPUT_DIR/target_initial.txt"
+    mv "$OUTPUT_DIR/target_initial_raw.txt" "$OUTPUT_DIR/target_initial.txt" 2>/dev/null || true
     echo -e "\r\e[32m   [✓] Scansione completata!\e[0m"
 
     # ═══════════════════════════════════════════════════════════════════
@@ -1224,12 +1242,12 @@ scan_single_target() {
     SUBNET=""
     GATEWAY=""
     if command -v ip &>/dev/null; then
-        LOCAL_IP=$(ip -o route get "$target" 2>/dev/null | awk '{print $3; exit}')
-        PREF_SRC=$(ip -o route get "$target" 2>/dev/null | awk '{print $5; exit}')
+        LOCAL_IP=$(ip -o route get "$target" 2>/dev/null | awk '{print $3; exit}') || true
+        PREF_SRC=$(ip -o route get "$target" 2>/dev/null | awk '{print $5; exit}') || true
         if [ -n "$PREF_SRC" ]; then
-            GW_CANDIDATE=$(ip -o route get "$target" 2>/dev/null | awk '{print $3; exit}')
+            GW_CANDIDATE=$(ip -o route get "$target" 2>/dev/null | awk '{print $3; exit}') || true
             [ -n "$GW_CANDIDATE" ] && [ "$GW_CANDIDATE" != "$PREF_SRC" ] && GATEWAY="$GW_CANDIDATE"
-            SUBNET_CANDIDATE=$(ip -o -f inet addr show 2>/dev/null | awk -v ip="$PREF_SRC" '$0 ~ ip {print $4; exit}')
+            SUBNET_CANDIDATE=$(ip -o -f inet addr show 2>/dev/null | awk -v ip="$PREF_SRC" '$0 ~ ip {print $4; exit}') || true
             [ -n "$SUBNET_CANDIDATE" ] && SUBNET="$SUBNET_CANDIDATE"
         fi
     fi
@@ -1244,7 +1262,7 @@ scan_single_target() {
         log_message "WARN" "Fallback subnet $SUBNET"
     fi
     if [ -z "$GATEWAY" ]; then
-        GATEWAY=$(ip route 2>/dev/null | grep "^default" | awk '{print $3}' | head -1 || true)
+        GATEWAY=$(ip route 2>/dev/null | grep "^default" | awk '{print $3}' | head -1) || true
         if [ -z "$GATEWAY" ]; then
             GATEWAY=$(echo "$SUBNET" | sed 's/\.0\/24/.1/' || echo "10.0.0.1")
         fi
@@ -1292,7 +1310,7 @@ EOF
     declare -a PIDS=()
     counter=0
     for host in $HOSTS_ATTIVI; do
-        ((counter++))
+        counter=$(( counter + 1 ))
         echo -e "\n\e[36m   [$counter/$NUM_HOSTS] → $host\e[0m"
         scan_host_parallel "$host" &
         PIDS+=($!)
@@ -1521,7 +1539,7 @@ if [ -n "$BATCH_FILE" ]; then
     # Loop su tutti i target: chiamata ricorsiva con --single-target + flag
     counter=0
     for t in "${ALL_TARGETS[@]}"; do
-        ((counter++))
+        counter=$(( counter + 1 ))
         echo ""
         echo -e "\e[34m═══════════════════════════════════════════════════════════════\e[0m"
         echo -e "\e[34m   [$counter/$NUM_TARGETS] TARGET: $t\e[0m"

@@ -1,8 +1,8 @@
 # ============================================================================
-# GitHub Actions CI/CD — Recon Manager
+# GitHub Actions CI/CD - Recon Manager
 # Build verification + automatic checksum generation
 #
-# AUTORE: Scotti Davide - Università Statale degli Studi di Milano
+# AUTORE: Scotti Davide - Universita Statale degli Studi di Milano
 # ============================================================================
 
 name: CI/CD - Recon Manager
@@ -37,7 +37,7 @@ jobs:
       - name: Run shellcheck on all scripts
         run: |
           for script in *.sh; do
-            echo "→ Checking $script..."
+            echo "-> Checking $script..."
             shellcheck --shell=bash --severity=warning "$script" || true
           done
         continue-on-error: true
@@ -46,8 +46,8 @@ jobs:
         run: |
           errors=0
           for script in *.sh; do
-            echo "→ Syntax: $script"
-            bash -n "$script" 2>/dev/null && echo "  ✅ OK" || { echo "  ❌ ERROR"; errors=$((errors+1)); }
+            echo "-> Syntax: $script"
+            bash -n "$script" 2>/dev/null && echo "  OK" || { echo "  ERROR"; errors=$((errors+1)); }
           done
           exit $errors
 

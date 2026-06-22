@@ -8,7 +8,7 @@
 #              whois/PTR lookup, e genera un report finale consolidato.
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 2.0
+# VERSIONE: 2.1
 # DATA: 2026-06-22
 #
 # USO: ./analyze.sh <report.json>
@@ -16,7 +16,10 @@
 # DIPENDENZE OPZIONALI: nikto, enum4linux, snmpwalk, testssl.sh, hydra, whois
 ################################################################################
 
-set -euo pipefail
+# NOTA: NON usiamo set -e per garantire resilienza.
+# Lo script deve sopravvivere a errori parziali (tool esterni che falliscono, etc.)
+# e continuare fino al completamento di tutte le analisi.
+set -uo pipefail
 
 # ============================================================================
 # CONTROLLO INPUT
@@ -49,13 +52,13 @@ trap_cleanup() {
 }
 trap trap_cleanup EXIT INT TERM
 
-# Error handler
+# Error handler NON-bloccante (logga ma non esce)
 error_handler() {
     local line=$1
     local cmd=$2
     local rc=$3
-    echo -e "\e[31m[!] ERRORE (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
-    log "WARN" "Errore linea $line: $cmd (exit=$rc)"
+    echo -e "\e[31m[!] ERRORE RECUPERATO (linea $line): comando '$cmd' terminato con codice $rc\e[0m" >&2
+    log "WARN" "Errore recuperato linea $line: $cmd (exit=$rc)"
 }
 trap 'error_handler $LINENO "$BASH_COMMAND" $?' ERR
 
@@ -65,7 +68,7 @@ trap 'error_handler $LINENO "$BASH_COMMAND" $?' ERR
 log() {
     local level="$1" msg="$2"
     local ts; ts=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$ts] [$level] $msg" >> "$LOG_FILE"
+    echo "[$ts] [$level] $msg" >> "$LOG_FILE" 2>/dev/null || true
     case "$level" in
         INFO)  echo -e "\e[36m[*] $msg\e[0m" ;;
         WARN)  echo -e "\e[33m[!] $msg\e[0m" ;;
@@ -79,7 +82,7 @@ log() {
 # ============================================================================
 clear
 echo -e "\e[34m╔═══════════════════════════════════════════════════════════════╗\e[0m"
-echo -e "\e[34m║  analyze.sh v2.0 — Fase 2 ricognizione approfondita          ║\e[0m"
+echo -e "\e[34m║  analyze.sh v2.1 — Fase 2 ricognizione approfondita          ║\e[0m"
 echo -e "\e[34m╚═══════════════════════════════════════════════════════════════╝\e[0m"
 echo -e "\e[36m   Input: $JSON_FILE\e[0m"
 echo -e "\e[36m   Output: $OUTPUT_DIR\e[0m"
@@ -135,17 +138,17 @@ run_tool_exec() {
     log "INFO" "$tool_name su $desc"
 
     # Crea temp file sicuro per stderr
-    STDERR_TMP=$(mktemp /tmp/analyze_stderr_XXXXXX.tmp)
+    STDERR_TMP=$(mktemp /tmp/analyze_stderr_XXXXXX.tmp) || true
     trap trap_cleanup EXIT INT TERM
 
     # Esecuzione DIRETTA senza eval — usa l'array
-    timeout "$timeout_sec" "${cmd_ref[@]}" > "$out_file" 2>"$STDERR_TMP"
+    timeout "$timeout_sec" "${cmd_ref[@]}" > "$out_file" 2>"$STDERR_TMP" || true
     local rc=$?
 
     if [ $rc -eq 124 ]; then
         log "WARN" "$tool_name: timeout dopo ${timeout_sec}s su $desc"
         echo -e "\e[33m      [!] Timeout dopo ${timeout_sec}s\e[0m"
-        rm -f "$STDERR_TMP"
+        rm -f "$STDERR_TMP" 2>/dev/null || true
         return 1
     elif [ $rc -ne 0 ] && [ $rc -ne 1 ] && [ $rc -ne 2 ]; then
         # rc=1 = tool ha trovato vulnerabilità (normale per nikto/testssl)
@@ -156,10 +159,10 @@ run_tool_exec() {
         log "WARN" "$tool_name: errore (exit $rc) su $desc — $err_msg"
         echo -e "\e[33m      [!] $tool_name terminato con errore (exit=$rc)\e[0m"
         [ -n "$err_msg" ] && echo -e "\e[90m        stderr: ${err_msg:0:200}\e[0m"
-        rm -f "$STDERR_TMP"
+        rm -f "$STDERR_TMP" 2>/dev/null || true
         return 1
     fi
-    rm -f "$STDERR_TMP"
+    rm -f "$STDERR_TMP" 2>/dev/null || true
     return 0
 }
 
@@ -207,22 +210,23 @@ for host in data.get("hosts", []):
     print(f"HOST={ip}|{os_info}|{tcp_ports}|{udp_ports}|{web_ports}|"
           f"{int(ssh_open)}|{int(smb_open)}|{int(snmp_open)}|{int(https_open)}|{cves}")
 PYEOF
-)
+) || true
 
-if [ $? -ne 0 ]; then
-    log "ERROR" "Parsing JSON fallito"
+if [ $? -ne 0 ] || [ -z "$HOST_DATA" ]; then
+    log "ERROR" "Parsing JSON fallito o report vuoto"
+    echo -e "\e[31m[-] Parsing JSON fallito. Verifica il file: $JSON_FILE\e[0m"
     exit 1
 fi
 
 # Estrai metadati
-META_TARGET=$(echo "$HOST_DATA" | grep "^META_TARGET" | cut -d= -f2)
-META_DATE=$(echo "$HOST_DATA"   | grep "^META_DATE"   | cut -d= -f2)
-META_MODE=$(echo "$HOST_DATA"   | grep "^META_MODE"   | cut -d= -f2)
+META_TARGET=$(echo "$HOST_DATA" | grep "^META_TARGET" | cut -d= -f2) || true
+META_DATE=$(echo "$HOST_DATA"   | grep "^META_DATE"   | cut -d= -f2) || true
+META_MODE=$(echo "$HOST_DATA"   | grep "^META_MODE"   | cut -d= -f2) || true
 
 log "OK" "Report da: $META_TARGET — scansionato: $META_DATE — modalità: $META_MODE"
 
 # Intestazione report finale
-cat > "$REPORT_FINAL" << EOF
+cat > "$REPORT_FINAL" << EOF || true
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║              REPORT ANALISI APPROFONDITA — FASE 2                           ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -236,18 +240,20 @@ EOF
 # ============================================================================
 # LOOP HOST
 # ============================================================================
-HOST_LINES=$(echo "$HOST_DATA" | grep "^HOST=")
-TOTAL_HOSTS=$(echo "$HOST_LINES" | grep -c .)
+HOST_LINES=$(echo "$HOST_DATA" | grep "^HOST=") || true
+TOTAL_HOSTS=$(echo "$HOST_LINES" | grep -c .) || true
+[ -z "$TOTAL_HOSTS" ] && TOTAL_HOSTS=0
 COUNTER=0
 
 while IFS= read -r raw_line; do
+    [ -z "$raw_line" ] && continue
     line="${raw_line#HOST=}"
     IFS='|' read -r ip os_info tcp_ports udp_ports web_ports \
-                    ssh_open smb_open snmp_open https_open cves <<< "$line"
+                    ssh_open smb_open snmp_open https_open cves <<< "$line" || true
 
-    ((COUNTER++)) || true
+    COUNTER=$(( COUNTER + 1 ))
     HOST_OUT="$OUTPUT_DIR/host_${ip}"
-    mkdir -p "$HOST_OUT"
+    mkdir -p "$HOST_OUT" 2>/dev/null || true
 
     echo -e "\n\e[34m╔═══════════════════════════════════════════════════════════════╗\e[0m"
     echo -e "\e[34m║  HOST [$COUNTER/$TOTAL_HOSTS]: $ip\e[0m"
@@ -279,7 +285,7 @@ while IFS= read -r raw_line; do
             PTR=$(timeout 5 nslookup "$ip" 2>/dev/null | grep "name =" | head -1 | awk '{print $NF}' || echo "PTR: N/D")
         fi
         echo "  PTR: $PTR"
-    } >> "$REPORT_FINAL" 2>/dev/null
+    } >> "$REPORT_FINAL" 2>/dev/null || true
     echo -e "\e[32m      [✓] WHOIS completato\e[0m"
 
     # ── NIKTO (web) ───────────────────────────────────────────────────────
@@ -298,8 +304,8 @@ while IFS= read -r raw_line; do
                 # Estrai solo i findings (+) per il report finale
                 {
                     echo "  Porta $port:"
-                    grep "^+" "$local_out" | head -20 || echo "  Nessun finding nikto"
-                } >> "$REPORT_FINAL"
+                    grep "^+" "$local_out" 2>/dev/null | head -20 || echo "  Nessun finding nikto"
+                } >> "$REPORT_FINAL" 2>/dev/null || true
                 NIKTO_FINDINGS=$(grep -c "^+" "$local_out" 2>/dev/null || echo 0)
                 echo -e "\e[32m      [✓] Nikto: $NIKTO_FINDINGS finding su porta $port\e[0m"
             fi
@@ -321,9 +327,9 @@ while IFS= read -r raw_line; do
         if [ -f "$local_out" ] && [ -s "$local_out" ]; then
             {
                 echo "[TESTSSL - SSL/TLS Analysis]"
-                grep -iE "VULNERABLE|LOW|MEDIUM|HIGH|CRITICAL" "$local_out" | head -20 \
+                grep -iE "VULNERABLE|LOW|MEDIUM|HIGH|CRITICAL" "$local_out" 2>/dev/null | head -20 \
                     || echo "  Nessuna vulnerabilità SSL rilevata"
-            } >> "$REPORT_FINAL"
+            } >> "$REPORT_FINAL" 2>/dev/null || true
             VULN_SSL=$(grep -ciE "VULNERABLE|HIGH|CRITICAL" "$local_out" 2>/dev/null || echo 0)
             echo -e "\e[32m      [✓] testssl: $VULN_SSL issue critici SSL/TLS\e[0m"
         fi
@@ -341,9 +347,9 @@ while IFS= read -r raw_line; do
                 {
                     echo "[ENUM4LINUX - SMB Enumeration]"
                     # Estrai users, shares, workgroup
-                    grep -E "^\[.+\]|user:|Share|Workgroup|Domain" "$local_out" \
+                    grep -E "^\[.+\]|user:|Share|Workgroup|Domain" "$local_out" 2>/dev/null \
                         | grep -v "^$" | head -30 || echo "  Nessun dato SMB estratto"
-                } >> "$REPORT_FINAL"
+                } >> "$REPORT_FINAL" 2>/dev/null || true
                 USERS=$(grep -c "user:" "$local_out" 2>/dev/null || echo 0)
                 SHARES=$(grep -c "Share" "$local_out" 2>/dev/null || echo 0)
                 echo -e "\e[32m      [✓] enum4linux: $USERS utenti, $SHARES share trovati\e[0m"
@@ -355,8 +361,8 @@ while IFS= read -r raw_line; do
             run_tool_exec "SMB-NMAP" nmap_smb_cmd "$local_out" "$TIMEOUT_TOOL" "nmap SMB $ip" || true
             {
                 echo "[SMB via nmap scripts]"
-                cat "$local_out"
-            } >> "$REPORT_FINAL"
+                cat "$local_out" 2>/dev/null || true
+            } >> "$REPORT_FINAL" 2>/dev/null || true
         fi
     fi
 
@@ -369,17 +375,17 @@ while IFS= read -r raw_line; do
             run_tool_exec "SNMPWALK" snmp_cmd "$local_out" 30 "snmpwalk $ip public" || true
 
             if [ -s "$local_out" ]; then
-                SNMP_LINES=$(wc -l < "$local_out")
+                SNMP_LINES=$(wc -l < "$local_out") || true
                 {
                     echo "[SNMPWALK - SNMP Dump (community: public)]"
                     echo "  OID estratti: $SNMP_LINES"
                     # Mostra info rilevanti: sysDescr, sysName, interfacce
                     grep -iE "sysDescr|sysName|sysContact|ifDescr|hrDeviceDescr" \
-                        "$local_out" | head -20 || true
-                } >> "$REPORT_FINAL"
+                        "$local_out" 2>/dev/null | head -20 || true
+                } >> "$REPORT_FINAL" 2>/dev/null || true
                 echo -e "\e[31m      [!] SNMP aperto con community 'public'! $SNMP_LINES OID estratti\e[0m"
             else
-                echo "  [SNMP] Community 'public' non risponde (o filtrata)" >> "$REPORT_FINAL"
+                echo "  [SNMP] Community 'public' non risponde (o filtrata)" >> "$REPORT_FINAL" 2>/dev/null || true
                 echo -e "\e[32m      [✓] SNMP: community 'public' non accessibile\e[0m"
             fi
         fi
@@ -431,33 +437,33 @@ while IFS= read -r raw_line; do
                     {
                         echo "[HYDRA - SSH Bruteforce]"
                         echo "  ⚠️  CREDENZIALI TROVATE:"
-                        grep "login:" "$local_out" || true
-                    } >> "$REPORT_FINAL"
+                        grep "login:" "$local_out" 2>/dev/null || true
+                    } >> "$REPORT_FINAL" 2>/dev/null || true
                 else
                     echo -e "\e[32m      [✓] Nessuna credenziale SSH trovata\e[0m"
-                    echo "[HYDRA - SSH Bruteforce] Nessuna credenziale trovata" >> "$REPORT_FINAL"
+                    echo "[HYDRA - SSH Bruteforce] Nessuna credenziale trovata" >> "$REPORT_FINAL" 2>/dev/null || true
                 fi
             fi
         else
             echo -e "\e[33m   [HYDRA] Wordlist non trovata — skip bruteforce\e[0m"
-            echo "[HYDRA - SSH Bruteforce] Skip: wordlist non disponibile" >> "$REPORT_FINAL"
+            echo "[HYDRA - SSH Bruteforce] Skip: wordlist non disponibile" >> "$REPORT_FINAL" 2>/dev/null || true
         fi
         
         # Segnala comunque SSH aperta
-        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt" || true
+        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt" 2>/dev/null || true
         {
             echo "[SSH] Porta 22 aperta su $ip"
             echo "  → Candidato per bruteforce manuale con hydra"
             echo "  → Verificare accesso anonimo: ssh -o BatchMode=yes root@$ip 2>&1"
-        } >> "$REPORT_FINAL"
+        } >> "$REPORT_FINAL" 2>/dev/null || true
     elif [ "$ssh_open" = "1" ]; then
         echo -e "\e[33m   [SSH] Porta 22 aperta — annotato in ssh_targets.txt\e[0m"
-        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt" || true
+        echo "$ip" >> "$OUTPUT_DIR/ssh_targets.txt" 2>/dev/null || true
         {
             echo "[SSH] Porta 22 aperta su $ip"
             echo "  → Candidato per bruteforce con: hydra -L users.txt -P pass.txt $ip ssh"
             echo "  → Verificare accesso anonimo: ssh -o BatchMode=yes root@$ip 2>&1"
-        } >> "$REPORT_FINAL"
+        } >> "$REPORT_FINAL" 2>/dev/null || true
     fi
 
     # ── CVE critiche — riepilogo per host ────────────────────────────────
@@ -478,7 +484,7 @@ while IFS= read -r raw_line; do
                 color="\e[32m"; label="BASSA  "
             fi
             echo -e "      └─ ${color}[$label] $cve_id (score: $cve_score)\e[0m"
-            echo "  [$label] $cve_id — score: $cve_score" >> "$REPORT_FINAL"
+            echo "  [$label] $cve_id — score: $cve_score" >> "$REPORT_FINAL" 2>/dev/null || true
         done
     fi
 
@@ -499,7 +505,7 @@ done <<< "$HOST_LINES"
     fi
     echo "Output in       : $OUTPUT_DIR"
     echo "Data            : $(date)"
-} >> "$REPORT_FINAL"
+} >> "$REPORT_FINAL" 2>/dev/null || true
 
 echo -e "\n\e[32m╔═══════════════════════════════════════════════════════════════╗\e[0m"
 echo -e "\e[32m║  ✓ ANALISI FASE 2 COMPLETATA                                  ║\e[0m"

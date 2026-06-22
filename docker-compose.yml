@@ -1,0 +1,45 @@
+################################################################################
+# docker-compose.yml — Recon Manager
+# 
+# AUTORE: Scotti Davide - Università Statale degli Studi di Milano
+# VERSIONE: 1.0
+#
+# USO: docker-compose run --rm recon scan TARGET=192.168.1.1
+#       docker-compose run --rm recon batch TARGETS=/data/targets.txt
+#       docker-compose run --rm recon pdf /app/sessioni/ricognizione_*/report.json
+################################################################################
+
+version: "3.8"
+
+services:
+  recon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: recon-manager:latest
+    container_name: recon-manager
+    network_mode: "host"
+    stdin_open: true
+    tty: true
+    volumes:
+      # Output delle sessioni (persistente)
+      - ./sessioni:/app/sessioni
+      # File targets per batch (mount esterno)
+      - ./targets:/data:ro
+      # Output generico
+      - ./output:/app/output
+      # Cache NVD persistente tra run docker
+      - recon_cache:/root/.cache/recognize_nvd
+      # Config personalizzata (opzionale)
+      - ./recon.conf:/app/recon.conf:ro
+    environment:
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      - TZ=Europe/Rome
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+
+volumes:
+  recon_cache:
+    name: recon_manager_cache

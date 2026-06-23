@@ -44,8 +44,8 @@ log() {
 
 section() {
     echo -e "\n${CYN}┌─────────────────────────────────────────────────────────────┐${RST}"
-    echo -e "${CYN}│  $1${RST}"
-    echo -e "${CYN}└─────────────────────────────────────────────────────────────┘${RST}"
+    echo -e "${CYN}  │  $1${RST}"                                                  |
+    echo -e "${CYN}  └─────────────────────────────────────────────────────────────┘${RST}"
 }
 
 check_root() {
@@ -310,8 +310,8 @@ post_install_config() {
 # ============================================================================
 clear
 echo -e "${CYN}╔═══════════════════════════════════════════════════════════════╗${RST}"
-echo -e "${CYN}║  install.sh v2.0 — Setup dipendenze recognize/analyze        ║${RST}"
-echo -e "${CYN}║  Autore: Scotti Davide — UniMi                               ║${RST}"
+echo -e "${CYN}║  install.sh v2.0 — Setup dipendenze recognize/analyze         ║${RST}"
+echo -e "${CYN}║  Autore: Scotti Davide — UniMi                                ║${RST}"
 echo -e "${CYN}╚═══════════════════════════════════════════════════════════════╝${RST}"
 echo ""
 

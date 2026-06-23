@@ -107,6 +107,11 @@ show_disclaimer() {
   ╚══════════════════════════════════════════════════════════════════╝
 EOF
     echo -e "\e[0m"
+    if [ "${NON_INTERACTIVE:-false}" = "true" ]; then
+        echo -e "\e[33m  [--yes] Disclaimer accettato automaticamente (modalità non interattiva)\e[0m"
+        echo ""
+        return 0
+    fi
     read -rp "  Ho letto e accetto. Confermo di operare su rete autorizzata [si/no]: " accept
     [[ "$accept" != "si" ]] && { echo -e "\e[31m  Uscita.\e[0m"; exit 1; }
     echo ""
@@ -125,7 +130,7 @@ validate_target() {
     # A) Formato IP o hostname risolvibile
     if [[ "$target" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
         IFS='.' read -r a b c d <<< "$target"
-        for oct in $a $b $c $d; do
+        for oct in "$a" "$b" "$c" "$d"; do
             if (( oct > 255 )); then
                 echo -e "\e[31m[-] IP non valido: ottetto $oct fuori range (0-255)\e[0m"
                 return 1
@@ -199,6 +204,18 @@ select_mode() {
     echo -e "  \e[36m4)\e[0m \e[1mSILENT & MASSIVE\e[0m - Nascosta, lenta, tutte le porte"
     echo ""
     echo -e "\e[34m───────────────────────────────────────────────────────────────\e[0m"
+    # Se non interattivo, usa modalità FAST (2) come default
+    if [ "${NON_INTERACTIVE:-false}" = "true" ]; then
+        MODE_CHOICE=2
+        echo -e "\e[33m  [--yes] Modalità FAST selezionata automaticamente (non interattivo)\e[0m"
+        echo ""
+        # Imposta parametri modalità FAST
+        NMAP_TIMING="-T4"; NMAP_TOP_PORTS_INITIAL="1000"; NMAP_TOP_PORTS_DETAIL="500"
+        NMAP_VERSION_INTENSITY="5"; NMAP_SCRIPTS="vulners"
+        USE_ALL_PORTS=false; USE_FRAGMENT=false; USE_DECOYS=false; USE_SPOOF=false
+        SPOOF_MAC="0"; DECOY_HOSTS=""; LOG_LEVEL="WARN"; MAX_PARALLEL_JOBS=4
+        return
+    fi
     read -rp "  ➤ Inserisci il numero della modalità [1-4]: " MODE_CHOICE
 
     case $MODE_CHOICE in
@@ -704,9 +721,9 @@ scan_tcp_host() {
     [ "$USE_ALL_PORTS" = true ] && timeout_sec=7200
 
     log_message "DEBUG" "Avvio scan TCP su $host (timeout ${timeout_sec}s)"
-    timeout "$timeout_sec" "${cmd[@]}" > "$raw_out" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
-    local rc=$?
-    if [ $rc -eq 124 ]; then
+    local rc=0
+    timeout "$timeout_sec" "${cmd[@]}" > "$raw_out" 2>>"$OUTPUT_DIR/nmap_errors.log" || rc=$?
+    if [ "$rc" -eq 124 ]; then
         log_message "WARN" "Scan TCP su $host: timeout dopo ${timeout_sec}s"
         echo "TCP scan TIMEOUT after ${timeout_sec}s" > "$raw_out"
     fi
@@ -729,9 +746,9 @@ scan_udp_host() {
     cmd+=("$host")
 
     log_message "DEBUG" "Avvio scan UDP su $host"
-    timeout 600 "${cmd[@]}" > "$out" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
-    local rc=$?
-    if [ $rc -eq 124 ]; then
+    local rc=0
+    timeout 600 "${cmd[@]}" > "$out" 2>>"$OUTPUT_DIR/nmap_errors.log" || rc=$?
+    if [ "$rc" -eq 124 ]; then
         log_message "WARN" "Scan UDP su $host: timeout dopo 600s"
         echo "UDP scan TIMEOUT after 600s" > "$out"
     fi
@@ -832,14 +849,17 @@ analyze_host_results() {
         mapfile -t cve_list < <(grep -oE "CVE-[0-9]{4}-[0-9]{4,}" "$scan_file" | sort -u)
 
         # Fetch NVD batch per tutte le CVE di questo host
+        local host_av_map_file=""
         if [ ${#cve_list[@]} -gt 0 ]; then
-            local av_map_file
-            av_map_file=$(fetch_cvss_from_nvd_batch "$REPORT_ANALISI" "${cve_list[@]}")
-            export NVD_AV_MAP_FILE="$av_map_file"
-            export CVE_AV_MAP_FETCHED="true"
+            host_av_map_file=$(fetch_cvss_from_nvd_batch "$REPORT_ANALISI" "${cve_list[@]}")
         fi
 
         for cve in "${cve_list[@]}"; do
+            local saved_av_map_file="$host_av_map_file"
+            local saved_av_map_fetched=""
+            [ -n "$host_av_map_file" ] && saved_av_map_fetched="true"
+            export NVD_AV_MAP_FILE="$saved_av_map_file"
+            export CVE_AV_MAP_FETCHED="$saved_av_map_fetched"
             local score="0"
             score=$(grep -A1 "$cve" "$scan_file" 2>/dev/null | grep -oE "[0-9]+\.[0-9]" | head -1 || echo "0")
             write_lock "$OUTPUT_DIR/.report_vuln_lock"
@@ -868,11 +888,11 @@ analyze_host_results() {
         echo "    \"$host\" [color=tomato, label=\"$host\\nOS: $os_detected\\n(CRITICO)\"];" >> "$GRAPH_DOT" 2>/dev/null || true
     fi
 
-    # Pulisci av_map file se presente
-    if [ -n "${NVD_AV_MAP_FILE:-}" ] && [ -f "$NVD_AV_MAP_FILE" ]; then
-        rm -f "$NVD_AV_MAP_FILE" 2>/dev/null || true
-        unset NVD_AV_MAP_FILE CVE_AV_MAP_FETCHED
+    # Pulisci av_map file se presente (usa variabile locale per evitare race condition)
+    if [ -n "${host_av_map_file:-}" ] && [ -f "$host_av_map_file" ]; then
+        rm -f "$host_av_map_file" 2>/dev/null || true
     fi
+    unset NVD_AV_MAP_FILE CVE_AV_MAP_FETCHED
 
     if [ "$cve_present" = false ]; then
         echo -e "\e[32m   └─ Nessuna vulnerabilità nota rilevata\e[0m"
@@ -1227,8 +1247,9 @@ scan_single_target() {
     echo -ne "\e[36m   [⏳] Scansione in corso...\e[0m"
     # Timeout globale per scansione iniziale
     local init_timeout=3600
-    timeout "$init_timeout" "${NMAP_INITIAL[@]}" > "$OUTPUT_DIR/target_initial_raw.txt" 2>>"$OUTPUT_DIR/nmap_errors.log" || true
-    if [ $? -eq 124 ]; then
+    local init_rc=0
+    timeout "$init_timeout" "${NMAP_INITIAL[@]}" > "$OUTPUT_DIR/target_initial_raw.txt" 2>>"$OUTPUT_DIR/nmap_errors.log" || init_rc=$?
+    if [ "$init_rc" -eq 124 ]; then
         echo -e "\r\e[33m   [!] Scansione iniziale: timeout dopo ${init_timeout}s\e[0m"
         echo "INITIAL SCAN TIMEOUT after ${init_timeout}s" > "$OUTPUT_DIR/target_initial_raw.txt"
     fi
@@ -1389,12 +1410,17 @@ EOF
 BATCH_FILE=""
 TARGET=""
 SKIP_DISCLAIMER=false
+NON_INTERACTIVE=false
 
 # Help
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Uso: $0 <IP_TARGET>"
     echo "     $0 --batch <file_targets.txt>"
     echo "     $0 -h | --help"
+    echo "     $0 --yes <IP_TARGET>"
+    echo ""
+    echo "Opzioni:"
+    echo "  --yes | --non-interactive  Modalità non interattiva (salta disclaimer e menu)"
     echo ""
     echo "Modalità singola:   $0 192.168.1.10"
     echo "Modalità batch:     $0 --batch targets.txt"
@@ -1432,6 +1458,14 @@ while [ $i -le $# ]; do
         continue
     fi
 
+    # Flag non interattivo
+    if [ "$arg" = "--yes" ] || [ "$arg" = "--non-interactive" ]; then
+        NON_INTERACTIVE=true
+        SKIP_DISCLAIMER=true
+        i=$(( i + 1 ))
+        continue
+    fi
+
     # Flag con valore (stile --flag=value)
     if [[ "$arg" =~ ^--[a-z-]+=.* ]]; then
         local flag_name="${arg%%=*}"
@@ -1466,7 +1500,6 @@ while [ $i -le $# ]; do
         *) i=$(( i + 1 )) ;;
     esac
 done
-
 # Se --single-target ha fornito un target, impostalo
 if [ -n "$PARSED_TARGET" ]; then
     TARGET="$PARSED_TARGET"

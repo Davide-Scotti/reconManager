@@ -80,7 +80,8 @@ pdf:
 		echo "$(YELLOW)[!] Cerca con: find sessioni -name report.json$(RESET)"; \
 		exit 1; \
 	fi
-	$(COMPOSE) run --rm recon ./report_pdf.sh $(abspath $(REPORT))
+	$(eval REPORT_REL := $(shell python3 -c "import os; print(os.path.relpath('$(REPORT)', '.'))"))
+	$(COMPOSE) run --rm recon ./report_pdf.sh /app/$(REPORT_REL)
 
 # ── Shell interattiva ──
 .PHONY: shell
@@ -105,6 +106,13 @@ check:
 install:
 	@echo "$(CYAN)[*] Installazione dipendenze locali...$(RESET)"
 	sudo ./install.sh
+
+# ── Analyze (Fase 2) ──
+.PHONY: analyze
+analyze:
+	@echo "$(CYAN)[*] Avvio analisi Fase 2 su report: $(REPORT)$(RESET)"
+	@mkdir -p sessioni output
+	$(COMPOSE) run --rm recon ./analyze.sh /app/$(REPORT)
 
 # ── Clean ──
 .PHONY: clean

@@ -66,6 +66,6 @@ RUN chmod +x /app/*.sh
 # Copia config se presente (non bloccante se assente)
 COPY recon.conf* /app/
 
-# Entrypoint flessibile: bash di default, manager.sh come comando
-ENTRYPOINT ["/bin/bash"]
-CMD ["/app/manager.sh"]
+# Entrypoint diretto: manager.sh come default, sovrascrivibile con altri script
+ENTRYPOINT []
+CMD ["/bin/bash", "/app/manager.sh"]

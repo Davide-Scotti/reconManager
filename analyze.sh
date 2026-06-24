@@ -426,7 +426,7 @@ while IFS= read -r raw_line; do
             local_out="$HOST_OUT/hydra_ssh.txt"
             # Usa solo i primi 50 utenti e 100 password per velocità
             local hydra_cmd=(hydra -L "$userlist" -P "$passlist" -t 4 -o "$local_out" \
-                            -f -V ssh://"$ip" 2>/dev/null)
+                            -f -V ssh://"$ip")
             run_tool_exec "HYDRA" hydra_cmd "$local_out" "$TIMEOUT_HYDRA" "hydra SSH $ip" || true
             
             if [ -f "$local_out" ] && [ -s "$local_out" ]; then

@@ -123,33 +123,33 @@ EOF
 validate_target() {
     local target="$1"
     local retarget="$target"
-    echo -e "\e[34m╔═══════════════════════════════════════════════════════════════╗\e[0m"
-    echo -e "\e[34m║  [0/7] VALIDAZIONE TARGET                                ║\e[0m"
-    echo -e "\e[34m╚═══════════════════════════════════════════════════════════════╝\e[0m"
+    echo -e "\e[34m╔═══════════════════════════════════════════════════════════════╗\e[0m" >&2
+    echo -e "\e[34m║  [0/7] VALIDAZIONE TARGET                                ║\e[0m" >&2
+    echo -e "\e[34m╚═══════════════════════════════════════════════════════════════╝\e[0m" >&2
 
     # A) Formato IP o hostname risolvibile
     if [[ "$target" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
         IFS='.' read -r a b c d <<< "$target"
         for oct in "$a" "$b" "$c" "$d"; do
             if (( oct > 255 )); then
-                echo -e "\e[31m[-] IP non valido: ottetto $oct fuori range (0-255)\e[0m"
+                echo -e "\e[31m[-] IP non valido: ottetto $oct fuori range (0-255)\e[0m" >&2
                 return 1
             fi
         done
-        echo -e "\e[32m   [✓] Formato IP valido\e[0m"
+        echo -e "\e[32m   [✓] Formato IP valido\e[0m" >&2
     else
-        echo -ne "\e[36m   [*] Risoluzione hostname '$target'...\e[0m"
+        echo -ne "\e[36m   [*] Risoluzione hostname '$target'...\e[0m" >&2
         if ! command -v host &>/dev/null; then
-            echo -e "\e[33m\n   [!] 'host' non disponibile, skip risoluzione\e[0m"
+            echo -e "\e[33m\n   [!] 'host' non disponibile, skip risoluzione\e[0m" >&2
         else
             local resolved
             resolved=$(host "$target" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}') || true
             if [ -z "$resolved" ]; then
-                echo -e "\e[31m\n[-] '$target' non è un IP valido né un hostname risolvibile\e[0m"
+                echo -e "\e[31m\n[-] '$target' non è un IP valido né un hostname risolvibile\e[0m" >&2
                 return 1
             fi
             retarget="$resolved"
-            echo -e "\r\e[32m   [✓] Hostname risolto a: $retarget                    \e[0m"
+            echo -e "\r\e[32m   [✓] Hostname risolto a: $retarget                    \e[0m" >&2
         fi
     fi
 
@@ -162,30 +162,30 @@ validate_target() {
     [[ $a -eq 127 ]] && is_private=true
 
     if [ "$is_private" = false ]; then
-        echo -e "\e[31m"
-        echo "  ╔══════════════════════════════════════════════════════╗"
-        echo "  ║  ⚠️  ATTENZIONE: IP PUBBLICO RILEVATO             ║"
-        printf "  ║  %-48s║\n" "  $retarget non appartiene a RFC 1918"
-        echo "  ║  Scansionare host non autorizzati è REATO        ║"
-        echo "  ╚══════════════════════════════════════════════════════╝"
-        echo -e "\e[0m"
+        echo -e "\e[31m" >&2
+        echo "  ╔══════════════════════════════════════════════════════╗" >&2
+        echo "  ║  ⚠️  ATTENZIONE: IP PUBBLICO RILEVATO             ║" >&2
+        printf "  ║  %-48s║\n" "  $retarget non appartiene a RFC 1918" >&2
+        echo "  ║  Scansionare host non autorizzati è REATO        ║" >&2
+        echo "  ╚══════════════════════════════════════════════════════╝" >&2
+        echo -e "\e[0m" >&2
         read -rp "  Confermi di avere AUTORIZZAZIONE SCRITTA per $retarget? [si/no]: " confirm
         [[ "$confirm" != "si" ]] && { echo "  Uscita."; exit 0; }
     else
-        echo -e "\e[32m   [✓] Target in range RFC 1918 (rete privata)\e[0m"
+        echo -e "\e[32m   [✓] Target in range RFC 1918 (rete privata)\e[0m" >&2
     fi
 
     # C) Raggiungibilità
-    echo -ne "\e[36m   [*] Verifica raggiungibilità $retarget...\e[0m"
+    echo -ne "\e[36m   [*] Verifica raggiungibilità $retarget...\e[0m" >&2
     if ! ping -c 1 -W 2 "$retarget" &>/dev/null 2>&1; then
-        echo -e "\r\e[33m   [!] $retarget non risponde al ping (host down o ICMP bloccato)\e[0m"
+        echo -e "\r\e[33m   [!] $retarget non risponde al ping (host down o ICMP bloccato)\e[0m" >&2
         read -rp "      Continuare comunque con -Pn? [si/no]: " cont
         [[ "$cont" != "si" ]] && exit 0
     else
-        echo -e "\r\e[32m   [✓] Host raggiungibile                              \e[0m"
+        echo -e "\r\e[32m   [✓] Host raggiungibile                              \e[0m" >&2
     fi
 
-    # Scrivi risultato su stdout per la funzione chiamante
+    # Scrivi risultato su stdout per la funzione chiamante (SOLO questa riga)
     echo "$retarget"
 }
 

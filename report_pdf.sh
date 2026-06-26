@@ -8,7 +8,7 @@
 # DIPENDENZE: python3 + reportlab
 #
 # AUTORE: Scotti Davide - Università Statale degli Studi di Milano
-# VERSIONE: 3.0
+# VERSIONE: 2.0
 # DATA: 2026-06-25
 #
 # USO: ./report_pdf.sh <report.json> [output.pdf]

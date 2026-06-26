@@ -45,8 +45,6 @@ TIMEOUT_HYDRA=300   # 5 min per hydra
 HYDRA_USERLIST="/usr/share/wordlists/metasploit/namelist.txt"
 HYDRA_PASSLIST="/usr/share/wordlists/rockyou.txt.gz"
 
-# Temp file sicuri
-STDERR_TMP=""
 trap_cleanup() {
     rm -f "${STDERR_TMP:-}" 2>/dev/null || true
 }
@@ -240,7 +238,7 @@ EOF
 # ============================================================================
 # LOOP HOST
 # ============================================================================
-HOST_LINES=$(echo "$HOST_DATA" | grep "^HOST=") || true
+HOST_LINES=$(echo "$HOST_DATA" | grep "^HOST=" || true)
 TOTAL_HOSTS=$(echo "$HOST_LINES" | grep -c .) || true
 [ -z "$TOTAL_HOSTS" ] && TOTAL_HOSTS=0
 COUNTER=0

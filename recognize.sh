@@ -1273,7 +1273,7 @@ scan_single_target() {
         fi
     fi
     if [ -z "$SUBNET" ]; then
-        local target_net
+        target_net=""
         target_net=$(echo "$target" | grep -oE '^([0-9]{1,3}\.){2}[0-9]{1,3}\.' || true)
         if [ -n "$target_net" ]; then
             SUBNET="${target_net}0/24"
@@ -1397,7 +1397,7 @@ EOF
     generate_csv_report
 
     # Riepilogo target completato
-    local critical_cves
+    critical_cves=""
     critical_cves=$(grep -c "🔴 CRITICA" "$PRIORITY_FILE" 2>/dev/null || echo 0)
     echo -e "\n\e[32m   [✓] Target $target completato\e[0m"
     [ "${critical_cves:-0}" -gt 0 ] && echo -e "\e[31m   ⚠️  $critical_cves vulnerabilità CRITICHE\e[0m"
@@ -1635,7 +1635,7 @@ fi
 scan_single_target "$TARGET"
 
 # Riepilogo finale
-local crit_count
+crit_count=""
 crit_count=$(grep -c "🔴 CRITICA" "$OUTPUT_DIR/00_priorita.txt" 2>/dev/null || echo 0)
 
 echo -e "\n\e[32m╔═══════════════════════════════════════════════════════════════╗\e[0m"

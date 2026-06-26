@@ -44,8 +44,8 @@ log() {
 
 section() {
     echo -e "\n${CYN}┌─────────────────────────────────────────────────────────────┐${RST}"
-    echo -e "${CYN}  │  $1${RST}"                                                  |
-    echo -e "${CYN}  └─────────────────────────────────────────────────────────────┘${RST}"
+    echo -e   "${CYN}  │                                                             |${RST}"
+    echo -e   "${CYN}  └─────────────────────────────────────────────────────────────┘${RST}"
 }
 
 check_root() {
@@ -152,7 +152,7 @@ install_testssl() {
     section "testssl.sh (SSL/TLS analyzer)"
     if [ -f "$TESTSSL_DEST" ]; then
         # Verifica se l'ultima versione
-        local local_ver remote_ver
+        local local_ver
         local_ver=$("$TESTSSL_DEST" --version 2>/dev/null | head -1 || echo "0")
         log "SKIP" "testssl.sh già presente in $TESTSSL_DEST ($local_ver)"
         return 0

@@ -651,7 +651,7 @@ menu_log() {
     echo ""
     read -rp "  ➤ Scelta: " SCELTA
     [[ "$SCELTA" == "1" ]] && confirm "Cancellare il log?" && \
-        { > "$MANAGER_LOG"; echo -e "  ${GRN}[✓] Log cancellato${RST}"; }
+        { true > "$MANAGER_LOG"; echo -e "  ${GRN}[✓] Log cancellato${RST}"; }
     press_enter
 }
 

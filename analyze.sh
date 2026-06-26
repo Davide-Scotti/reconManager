@@ -295,8 +295,7 @@ while IFS= read -r raw_line; do
         for port in "${WPORTS[@]}"; do
             echo -e "\e[36m      → nikto su $ip:$port...\e[0m"
             local_out="$HOST_OUT/nikto_${port}.txt"
-            local nikto_cmd
-            nikto_cmd="nikto -host $target -port $port -Format txt -output $OUTPUT_DIR/nikto_${target}_${port}.txt"
+            nikto_cmd="nikto -host $ip -port $port -Format txt -output $OUTPUT_DIR/nikto_${ip}_${port}.txt"
             run_tool_exec "NIKTO" nikto_cmd "$local_out" "$TIMEOUT_NIKTO" "nikto $ip:$port" || true
             
             if [ -f "$local_out" ] && [ -s "$local_out" ]; then
@@ -316,12 +315,11 @@ while IFS= read -r raw_line; do
     # ── TESTSSL (HTTPS) ───────────────────────────────────────────────────
     if [ "$https_open" = "1" ] && [ "${TOOLS_AVAILABLE[testssl]}" = true ]; then
         echo -e "\e[36m   [TESTSSL] Analisi SSL/TLS su $ip:443...\e[0m"
-        local_out="$HOST_OUT/testssl.txt"
-        TESTSSL_BIN="testssl"
-        command -v testssl.sh &>/dev/null && TESTSSL_BIN="testssl.sh"
+            local_out="$HOST_OUT/testssl.txt"
+            TESTSSL_BIN="testssl"
+            command -v testssl.sh &>/dev/null && TESTSSL_BIN="testssl.sh"
 
-        local testssl_cmd
-        testssl_cmd="$TESTSSL_PATH --severity MEDIUM --logfile $OUTPUT_DIR/testssl_${target}.txt $target"
+            testssl_cmd="$TESTSSL_BIN --severity MEDIUM --logfile $OUTPUT_DIR/testssl_${ip}.txt $ip"
         run_tool_exec "TESTSSL" testssl_cmd "$local_out" "$TIMEOUT_TESTSSL" "testssl $ip:443" || true
 
         if [ -f "$local_out" ] && [ -s "$local_out" ]; then
@@ -340,8 +338,7 @@ while IFS= read -r raw_line; do
         if [ "${TOOLS_AVAILABLE[enum4linux]}" = true ]; then
             echo -e "\e[36m   [ENUM4LINUX] Enumerazione SMB su $ip...\e[0m"
             local_out="$HOST_OUT/smb_enum4linux.txt"
-            local enum_cmd
-            enum_cmd="enum4linux -a $target"
+            enum_cmd="enum4linux -a $ip"
             run_tool_exec "ENUM4LINUX" enum_cmd "$local_out" "$TIMEOUT_TOOL" "enum4linux $ip" || true
 
             if [ -f "$local_out" ] && [ -s "$local_out" ]; then
@@ -358,8 +355,7 @@ while IFS= read -r raw_line; do
         else
             echo -e "\e[33m   [ENUM4LINUX] Non installato — uso nmap smb-enum-shares\e[0m"
             local_out="$HOST_OUT/smb_nmap.txt"
-            local nmap_smb_cmd
-            nmap_smb_cmd="nmap -p 139,445 --script smb-vuln* --script-args unsafe=1 -oN $OUTPUT_DIR/nmap_smb_${target}.txt $target"
+            nmap_smb_cmd="nmap -p 139,445 --script smb-vuln* --script-args unsafe=1 -oN $OUTPUT_DIR/nmap_smb_${ip}.txt $ip"
             run_tool_exec "SMB-NMAP" nmap_smb_cmd "$local_out" "$TIMEOUT_TOOL" "nmap SMB $ip" || true
             {
                 echo "[SMB via nmap scripts]"
@@ -373,8 +369,7 @@ while IFS= read -r raw_line; do
         if [ "${TOOLS_AVAILABLE[snmpwalk]}" = true ]; then
             echo -e "\e[36m   [SNMPWALK] Dump SNMP su $ip (community: public)...\e[0m"
             local_out="$HOST_OUT/snmp_dump.txt"
-            local snmp_cmd
-            snmp_cmd="snmpwalk -v 2c -c public $target"
+            snmp_cmd="snmpwalk -v 2c -c public $ip"
             run_tool_exec "SNMPWALK" snmp_cmd "$local_out" 30 "snmpwalk $ip public" || true
 
             if [ -s "$local_out" ]; then
@@ -396,8 +391,7 @@ while IFS= read -r raw_line; do
         # Prova anche v1 e community "private"
         if [ "${TOOLS_AVAILABLE[snmpwalk]}" = true ]; then
             local_out_priv="$HOST_OUT/snmp_private.txt"
-            local snmp_priv_cmd
-            snmp_priv_cmd="snmpwalk -v 2c -c private $target"
+            snmp_priv_cmd="snmpwalk -v 2c -c private $ip"
             run_tool_exec "SNMPWALK" snmp_priv_cmd "$local_out_priv" 20 "snmpwalk $ip private" || true
             [ -s "$local_out_priv" ] && \
                 echo -e "\e[31m      [!] SNMP community 'private' ACCESSIBILE!\e[0m"
@@ -429,12 +423,10 @@ while IFS= read -r raw_line; do
         if [ -n "$userlist" ] && [ -n "$passlist" ]; then
             local_out="$HOST_OUT/hydra_ssh.txt"
             # Usa solo i primi 50 utenti e 100 password per velocità
-            local hydra_cmd
-            hydra_cmd="hydra -L $userlist -P $passlist ssh://$target:$port -o $OUTPUT_DIR/hydra_ssh_${target}_${port}.txt -f -vV"
+            hydra_cmd="hydra -L $userlist -P $passlist ssh://$ip:$port -o $OUTPUT_DIR/hydra_ssh_${ip}_${port}.txt -f -vV"
             run_tool_exec "HYDRA" hydra_cmd "$local_out" "$TIMEOUT_HYDRA" "hydra SSH $ip" || true
             
             if [ -f "$local_out" ] && [ -s "$local_out" ]; then
-                found
                 found=$(grep -c "login:" "$local_out" 2>/dev/null || echo 0)
                 if [ "$found" -gt 0 ]; then
                     echo -e "\e[31m      [!] HYDRA: $found credenziali SSH trovate!\e[0m"

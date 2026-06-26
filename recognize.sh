@@ -422,7 +422,6 @@ fetch_cvss_from_nvd_batch() {
     # Prima controlla cache per tutte
     local cache_miss=()
     local results_map=()
-    local idx=0
 
     while read -r line; do
         if [[ "$line" == CVEHIT\|* ]]; then
@@ -1099,7 +1098,7 @@ generate_csv_report() {
         echo "Priorita;CVE;Score;Host;OS;Verdetto"
         if [ -f "$REPORT_VULN" ]; then
             grep -E "CVE-[0-9]{4}-[0-9]{4,}" "$REPORT_VULN" 2>/dev/null | while read -r line; do
-                local cve score priority verdetto host_line
+                local cve score priority verdetto
                 cve=$(echo "$line" | grep -oE "CVE-[0-9]{4}-[0-9]{4,}") || true
                 score=$(echo "$line" | grep -oE "[0-9]+\.[0-9]" | head -1) || true
                 priority=$(python3 -c "
@@ -1263,7 +1262,6 @@ scan_single_target() {
     SUBNET=""
     GATEWAY=""
     if command -v ip &>/dev/null; then
-        LOCAL_IP=$(ip -o route get "$target" 2>/dev/null | awk '{print $3; exit}') || true
         PREF_SRC=$(ip -o route get "$target" 2>/dev/null | awk '{print $5; exit}') || true
         if [ -n "$PREF_SRC" ]; then
             GW_CANDIDATE=$(ip -o route get "$target" 2>/dev/null | awk '{print $3; exit}') || true
@@ -1468,8 +1466,8 @@ while [ $i -le $# ]; do
 
     # Flag con valore (stile --flag=value)
     if [[ "$arg" =~ ^--[a-z-]+=.* ]]; then
-        local flag_name="${arg%%=*}"
-        local flag_val="${arg#*=}"
+        flag_name="${arg%%=*}"
+        flag_val="${arg#*=}"
         case "$flag_name" in
             --output-dir)   PARSED_OUTPUT_DIR="$flag_val" ;;
             --nmap-timing)  PARSED_NMAP_TIMING="$flag_val" ;;
@@ -1590,7 +1588,6 @@ if [ -n "$BATCH_FILE" ]; then
     done
 
     # Riepilogo batch
-    local total_cves
     total_cves=$(grep -r "CVE-" "$OUTPUT_DIR" 2>/dev/null | grep -c "CVE-" || echo 0)
 
     echo ""

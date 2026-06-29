@@ -42,8 +42,8 @@ RUN apt-get update -qq && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Layer 2: Python dipendenze
-RUN pip3 install --quiet reportlab pyyaml
+# Layer 2: Python dipendenze (--break-system-packages per Kali PEP 668)
+RUN pip3 install --quiet --break-system-packages reportlab pyyaml
 
 # Layer 3: testssl.sh + nmap scripts
 RUN wget -q "https://github.com/drwetter/testssl.sh/releases/latest/download/testssl.sh" \

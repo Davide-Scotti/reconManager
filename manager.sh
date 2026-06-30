@@ -885,7 +885,59 @@ main_menu() {
 }
 
 # ============================================================================
-# AVVIO
+# AVVIO — Supporto argomenti da riga di comando (--help, target diretto)
 # ============================================================================
 log "Manager avviato — utente: $(whoami) — dir: $SCRIPT_DIR"
+
+# Se ci sono argomenti, li gestiamo (es. docker run recon-manager --help)
+if [ $# -gt 0 ]; then
+    case "${1:-}" in
+        --help|-h)
+            echo "Recon Manager — Strumento di ricognizione per pentesting etico"
+            echo ""
+            echo "USO:"
+            echo "  manager.sh                          Avvia il menu interattivo"
+            echo "  manager.sh --help                    Mostra questo messaggio"
+            echo "  manager.sh <IP/hostname>             Avvia recognize.sh direttamente sul target"
+            echo "  manager.sh --batch <file>            Avvia batch scanning da file"
+            echo ""
+            echo "MODALITÀ DI SCANSIONE (tramite menu interattivo, opzione 1):"
+            echo "  SILENT           T2, top 100 porte, no script, stealth massima"
+            echo "  FAST             T4, top 1000 porte, vulners"
+            echo "  FAST&MASSIVE     T5, tutte le porte, vulners, molto rumorosa"
+            echo "  SILENT&MASSIVE   T2, tutte le porte, vulners, decoy+spoof"
+            echo ""
+            echo "DOCKER:"
+            echo "  docker build -t recon-manager ."
+            echo "  docker run --rm -it recon-manager               Menu interattivo"
+            echo "  docker run --rm recon-manager --help             Questo help"
+            echo "  docker run --rm recon-manager 192.168.1.1        Ricognizione diretta"
+            exit 0
+            ;;
+        --batch)
+            if [ -z "${2:-}" ]; then
+                echo "ERRORE: --batch richiede un file di target come argomento." >&2
+                exit 1
+            fi
+            log "Batch da riga di comando — file: $2"
+            run_script_in_sessions "$RECOGNIZE" --batch "$2"
+            exit $?
+            ;;
+        *)
+            # Se è un IP/hostname, avvia recognize.sh direttamente
+            if validate_ip_quick "$1"; then
+                if ! check_target_allowed "$1"; then
+                    exit 1
+                fi
+                log "Target diretto da riga di comando — target: $1"
+                run_script_in_sessions "$RECOGNIZE" "$1"
+                exit $?
+            else
+                echo "ERRORE: argomento '$1' non riconosciuto. Usa --help per l'elenco dei comandi." >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
+
 main_menu

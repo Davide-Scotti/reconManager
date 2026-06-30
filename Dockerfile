@@ -66,6 +66,9 @@ RUN chmod +x /app/*.sh
 # Copia config se presente (non bloccante se assente)
 COPY recon.conf* /app/
 
-# Entrypoint diretto: manager.sh come default, sovrascrivibile con altri script
-ENTRYPOINT []
-CMD ["/bin/bash", "/app/manager.sh"]
+# Entrypoint: manager.sh come default, --help e altri flag passati come argomenti
+ENTRYPOINT ["/bin/bash", "/app/manager.sh"]
+# Uso:
+#   docker run --rm -it recon-manager            → menu interattivo
+#   docker run --rm recon-manager --help          → mostra help
+#   docker run --rm recon-manager 192.168.1.1     → avvia recognize.sh direttamente

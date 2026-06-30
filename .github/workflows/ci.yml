@@ -30,7 +30,7 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: './'
-          ignore: 'venv,node_modules,.git'
+          ignore_names: 'venv,node_modules,.git'
           severity: 'warning'
           
   python-lint:

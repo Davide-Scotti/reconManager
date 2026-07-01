@@ -29,6 +29,9 @@ fi
 
 OUTPUT_PDF="${2:-${JSON_FILE%.json}_report.pdf}"
 
+echo -e "\e[36m[*] Pulizia eventuali file preesistenti...\e[0m"
+rm -f "$OUTPUT_PDF" 2>/dev/null || true
+
 echo -e "\e[36m[*] Verifica dipendenze Python...\e[0m"
 for pkg in reportlab matplotlib numpy; do
     python3 -c "import $pkg" 2>/dev/null || {

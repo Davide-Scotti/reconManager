@@ -1237,7 +1237,7 @@ story.append(Paragraph("Classificazione: CONFIDENZIALE — Il presente documento
 # ════════════════════════════════════════════════════════════════════
 # BUILD
 # ════════════════════════════════════════════════════════════════════
-doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+doc.build(story)
 print(f"[OK] PDF generato: {OUT_PATH}")
 print(f"     Host: {n_hosts} | CVE: {n_cves} | Critiche: {n_critical} | Medie: {n_medium} | Basse: {n_low} | Rischio: {risk_score_1000}/1000 ({risk_level})")
 PYEOF

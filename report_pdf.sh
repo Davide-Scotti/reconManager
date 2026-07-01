@@ -267,7 +267,7 @@ def chart_heatmap(hosts):
 
     fig_h = max(1.6, 0.42*len(ips)+0.9)
     fig, ax = plt.subplots(figsize=(6.4, fig_h), dpi=DPI)
-    cmap = plt.cm.get_cmap("Reds")
+    cmap = plt.colormaps["Reds"]
     im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0)
     ax.set_xticks(range(len(cats))); ax.set_xticklabels(cats, fontsize=8, rotation=20, ha="right")
     ax.set_yticks(range(len(ips))); ax.set_yticklabels(ips, fontsize=8)
@@ -406,7 +406,10 @@ def rl_image(path, max_width_mm, dpi=DPI):
 # STYLES
 # ════════════════════════════════════════════════════════════════════
 styles = getSampleStyleSheet()
-def S(name, **kw): return ParagraphStyle(name, parent=styles['Normal'], **kw)
+def S(name, **kw):
+    if 'parent' not in kw:
+        return ParagraphStyle(name, parent=styles['Normal'], **kw)
+    return ParagraphStyle(name, **kw)
 
 sT = S('sTitle', fontSize=27, leading=33, textColor=C_WHITE, alignment=TA_LEFT,
        fontName='Helvetica-Bold', spaceAfter=2*mm)
